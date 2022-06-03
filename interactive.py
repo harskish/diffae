@@ -33,7 +33,7 @@ def sample_seeds(N, base=None):
 
 def sample_normal(shape=(1, 512), seed=None):
     seeds = sample_seeds(shape[0], base=seed)
-    return torch.tensor(seeds_to_samples(seeds, shape))
+    return seeds_to_samples(seeds, shape)
 
 def seeds_to_samples(seeds, shape=(1, 512)):
     latents = np.zeros(shape, dtype=np.float32)
@@ -41,7 +41,7 @@ def seeds_to_samples(seeds, shape=(1, 512)):
         rng = np.random.RandomState(seed)
         latents[i] = rng.standard_normal(shape[1:])
     
-    return latents
+    return torch.tensor(latents)
 
 class ModelViz(ToolbarViewer):    
     def __init__(self, name, batch_mode=False):
@@ -72,9 +72,11 @@ class ModelViz(ToolbarViewer):
     @lru_cache()
     def init_model(self):
         conf = ffhq256_autoenc_latent()
-        
         conf.seed = None
         conf.pretrain = None
+
+        assert conf.train_mode == TrainMode.latent_diffusion
+        assert conf.model_type.has_autoenc()
 
         model = LitModel(conf)
         state = torch.load(f'checkpoints/{conf.name}/last.ckpt', map_location='cpu')
@@ -82,6 +84,18 @@ class ModelViz(ToolbarViewer):
         model = model.to('cuda')
 
         return model
+
+    def update_samplers(self, s):
+        self.rend.model.conf.T_eval = max(2, s.T)
+        self.rend.model.conf.latent_T_eval = max(2, s.lat_T) # not used?
+        self.rend.sampl = self.rend.model.conf._make_diffusion_conf(max(2, s.T)).make_sampler()
+        # Latent sampler T must be divisible by 1000
+        while self.state.lat_T <= self.rend.model.conf.T:
+            try:
+                self.rend.lat_sampl = self.rend.model.conf._make_latent_diffusion_conf(max(2, self.state.lat_T)).make_sampler()
+                break
+            except ValueError:
+                self.state.lat_T += 1
 
     # Progress bar below images
     def draw_output_extra(self):
@@ -97,17 +111,9 @@ class ModelViz(ToolbarViewer):
         if self.rend.last_ui_state != s:
             self.rend.last_ui_state = s
             self.rend.model = self.init_model()
-            
-            # Setup samplers
-            self.rend.model.conf.T_eval = max(2, s.T)
-            self.rend.model.conf.latent_T_eval = max(2, s.lat_T) # not used?
-            self.rend.sampl = self.rend.model.conf._make_diffusion_conf(max(2, s.T)).make_sampler()
-            self.rend.lat_sampl = self.rend.model.conf._make_latent_diffusion_conf(max(2, s.lat_T)).make_sampler()
-
-            assert self.rend.model.conf.train_mode == TrainMode.latent_diffusion
-            assert self.rend.model.conf.model_type.has_autoenc()
-            res = self.rend.model.conf.img_size
+            self.update_samplers(s)
             self.rend.i = 0
+            res = self.rend.model.conf.img_size
             self.rend.intermed = sample_normal((s.B, 3, res, res), s.seed).cuda() # spaial noise
 
         # Check if work is done
@@ -118,26 +124,26 @@ class ModelViz(ToolbarViewer):
         ema_model = self.rend.model.ema_model
 
         # Sample latents
-        lats = []
-        for i in range(s.B):
-            key = (s.seed + i, s.lat_T)
-            if key not in self.rend.lat_cache:
-                latent_noise = sample_normal((1, conf.style_ch), s.seed + i).cuda()
-                lat = self.rend.lat_sampl.sample(
-                    model=ema_model.latent_net,
-                    noise=latent_noise,
-                    clip_denoised=conf.latent_clip_sample,
-                    progress=False,
-                )
+        keys = [(s.seed + i, s.lat_T) for i in range(s.B)]
+        missing = [k[0] for k in keys if k not in self.rend.lat_cache]
+        if missing:
+            latent_noise = seeds_to_samples(missing, (len(missing), conf.style_ch)).cuda()
+            lats = self.rend.lat_sampl.sample(
+                model=ema_model.latent_net,
+                noise=latent_noise,
+                clip_denoised=conf.latent_clip_sample,
+                progress=False,
+            )
 
-                if conf.latent_znormalize:
-                    lat = lat * self.rend.model.conds_std.cuda() + self.rend.model.conds_mean.cuda()
-                
-                self.rend.lat_cache[key] = lat
-            lats.append(self.rend.lat_cache[key])
+            if conf.latent_znormalize:
+                lats = lats * self.rend.model.conds_std.cuda() + self.rend.model.conds_mean.cuda()
+            
+            # Update cache
+            for seed, lat in zip(missing, lats):
+                self.rend.lat_cache[(seed, s.lat_T)] = lat
 
         # Run diffusion one step forward
-        model_kwargs = {'x_start': None, 'cond': torch.cat(lats, dim=0)}
+        model_kwargs = {'x_start': None, 'cond': torch.stack([self.rend.lat_cache[k] for k in keys], dim=0)}
         t = th.tensor([s.T - self.rend.i - 1] * s.B, device='cuda', requires_grad=False)
         ret = self.rend.sampl.ddim_sample(
             ema_model,
