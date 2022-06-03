@@ -1,0 +1,24 @@
+name: diffao
+channels:
+  - defaults
+  - pytorch
+  - conda-forge
+dependencies:
+  - python
+  - pytorch-lightning=1.5.10
+  - pytorch=1.8.1
+  - torchvision
+  - scipy=1.5.2
+  - numpy=1.19.5
+  - tqdm
+  - pandas=1.1.5
+  - ftfy
+  - regex
+  - pip
+  - pip:
+    - imgui[glfw]==1.3.0
+    - pytorch-fid
+    - lpips==0.1.4
+    - lmdb==1.2.1
+
+# conda env update -f environment.yml --prune
