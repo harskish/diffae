@@ -64,19 +64,18 @@ class ModelViz(ToolbarViewer):
         self.G_lock = Lock()
     
     @lru_cache()
-    def init_model(self, T_eval: int, lat_T_eval: int):
+    def init_model(self):
         conf = ffhq256_autoenc_latent()
-        conf.T_eval = T_eval
-        conf.latent_T_eval = lat_T_eval
+        
+        conf.seed = None
+        conf.pretrain = None
+
         model = LitModel(conf)
         state = torch.load(f'checkpoints/{conf.name}/last.ckpt', map_location='cpu')
         model.load_state_dict(state['state_dict'], strict=False)
         model = model.to('cuda')
 
-        sampl = model.conf._make_diffusion_conf(T_eval).make_sampler()
-        lat_sampl = model.conf._make_latent_diffusion_conf(lat_T_eval).make_sampler()
-
-        return (model, sampl, lat_sampl)
+        return model
 
     # Progress bar below images
     def draw_output_extra(self):
@@ -91,7 +90,14 @@ class ModelViz(ToolbarViewer):
         # Only works for fields annotated with type (e.g. sliders: list)
         if self.rend.last_ui_state != s:
             self.rend.last_ui_state = s
-            self.rend.model, self.rend.sampl, self.rend.lat_sampl = self.init_model(s.T, s.lat_T)
+            self.rend.model = self.init_model()
+            
+            # Setup samplers
+            self.rend.model.conf.T_eval = max(2, s.T)
+            self.rend.model.conf.latent_T_eval = max(2, s.lat_T)
+            self.rend.sampl = self.rend.model.conf._make_diffusion_conf(max(2, s.T)).make_sampler()
+            self.rend.lat_sampl = self.rend.model.conf._make_latent_diffusion_conf(max(2, s.lat_T)).make_sampler()
+
             assert self.rend.model.conf.train_mode == TrainMode.latent_diffusion
             assert self.rend.model.conf.model_type.has_autoenc()
             res = self.rend.model.conf.img_size
@@ -142,12 +148,10 @@ class ModelViz(ToolbarViewer):
     
     def draw_toolbar(self):
         s = self.state
-        #imgui.text(f'PKL: {os.path.basename(s.pkl or "")}')
         s.B = imgui.input_int('B', s.B)[1]
-        s.seed = imgui.input_int('Seed', s.seed)[1]
+        s.seed = imgui.input_int('Seed', s.seed, 1, s.B)[1]
         s.T = imgui.input_int('T_img', s.T)[1]
         s.lat_T = imgui.input_int('T_lat', s.lat_T)[1]
-        
 
 class VizMode(int, Enum):
     SINGLE = 0 # single image
