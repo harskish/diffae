@@ -10,7 +10,10 @@ from enum import Enum
 from viewer.toolbar_viewer import ToolbarViewer
 from viewer.utils import reshape_grid
 from typing import Dict, Tuple
+from os import makedirs
 import time
+from pathlib import Path
+import gdown
 
 from templates import *
 from templates_latent import *
@@ -64,6 +67,7 @@ class ModelViz(ToolbarViewer):
 
         self.G_lock = Lock()
         self.rend.img_cache = {}
+        self.rend.lat_cache = {}
     
     @lru_cache()
     def init_model(self):
@@ -96,7 +100,7 @@ class ModelViz(ToolbarViewer):
             
             # Setup samplers
             self.rend.model.conf.T_eval = max(2, s.T)
-            self.rend.model.conf.latent_T_eval = max(2, s.lat_T)
+            self.rend.model.conf.latent_T_eval = max(2, s.lat_T) # not used?
             self.rend.sampl = self.rend.model.conf._make_diffusion_conf(max(2, s.T)).make_sampler()
             self.rend.lat_sampl = self.rend.model.conf._make_latent_diffusion_conf(max(2, s.lat_T)).make_sampler()
 
@@ -105,7 +109,6 @@ class ModelViz(ToolbarViewer):
             res = self.rend.model.conf.img_size
             self.rend.i = 0
             self.rend.intermed = sample_normal((s.B, 3, res, res), s.seed).cuda() # spaial noise
-            self.rend.lat = None
 
         # Check if work is done
         if self.rend.i >= s.T:
@@ -115,20 +118,26 @@ class ModelViz(ToolbarViewer):
         ema_model = self.rend.model.ema_model
 
         # Sample latents
-        if self.rend.lat is None:
-            latent_noise = sample_normal((s.B, conf.style_ch), s.seed).cuda()
-            self.rend.lat = self.rend.lat_sampl.sample(
-                model=ema_model.latent_net,
-                noise=latent_noise,
-                clip_denoised=conf.latent_clip_sample,
-                progress=True,
-            )
+        lats = []
+        for i in range(s.B):
+            key = (s.seed + i, s.lat_T)
+            if key not in self.rend.lat_cache:
+                latent_noise = sample_normal((1, conf.style_ch), s.seed + i).cuda()
+                lat = self.rend.lat_sampl.sample(
+                    model=ema_model.latent_net,
+                    noise=latent_noise,
+                    clip_denoised=conf.latent_clip_sample,
+                    progress=False,
+                )
 
-            if conf.latent_znormalize:
-                self.rend.lat = self.rend.lat * self.rend.model.conds_std.cuda() + self.rend.model.conds_mean.cuda()
+                if conf.latent_znormalize:
+                    lat = lat * self.rend.model.conds_std.cuda() + self.rend.model.conds_mean.cuda()
+                
+                self.rend.lat_cache[key] = lat
+            lats.append(self.rend.lat_cache[key])
 
         # Run diffusion one step forward
-        model_kwargs = {'x_start': None, 'cond': self.rend.lat}
+        model_kwargs = {'x_start': None, 'cond': torch.cat(lats, dim=0)}
         t = th.tensor([s.T - self.rend.i - 1] * s.B, device='cuda', requires_grad=False)
         ret = self.rend.sampl.ddim_sample(
             ema_model,
@@ -165,7 +174,7 @@ class ModelViz(ToolbarViewer):
     def draw_toolbar(self):
         s = self.state
         s.B = imgui.input_int('B', s.B)[1]
-        s.seed = max(0, imgui.input_int('Seed', s.seed, 1, s.B)[1])
+        s.seed = max(0, imgui.input_int('Seed', s.seed, s.B, 1)[1])
         s.T = imgui.input_int('T_img', s.T, 1, 10)[1]
         s.lat_T = imgui.input_int('T_lat', s.lat_T, 1, 10)[1]
 
@@ -193,8 +202,8 @@ class RendererState:
     sampl: SpacedDiffusionBeatGans = None
     lat_sampl: SpacedDiffusionBeatGans = None
     intermed: torch.Tensor = None
-    lat: torch.Tensor = None
     img_cache: Dict[Tuple[int, int, int], torch.Tensor] = None
+    lat_cache: Dict[Tuple[int, int], torch.Tensor] = None
     i: int = 0 # current computation progress
 
 def init_torch():
@@ -207,11 +216,23 @@ def init_torch():
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
 
+def download_models():
+    files = [
+        ('1EW94TP50IKqGPbPCL-Uld1TGnRtdH8aa', 'ffhq256_autoenc_latent/last.ckpt'),
+        ('1y3cGbCIuMiGDyC6S-vt0SfoAxGP-GMPN', 'ffhq256_autoenc/latent.pkl')
+    ]
+    for id, suffix in files:
+        pth = Path(__file__).parent / 'checkpoints' / suffix
+        if not pth.is_file():
+            makedirs(pth.parent, exist_ok=True)
+            gdown.download(id=id, output=str(pth), quiet=False)
+
 if __name__ == '__main__':
     # parser = argparse.ArgumentParser(description='DiffAE visualizer')
     # parser.add_argument('input', type=str, help='Model ckpt')
     # args = parser.parse_args()
 
+    download_models()
     init_torch()
     viewer = ModelViz('diffae_viewer')
     print('Done')
