@@ -9,7 +9,8 @@ from functools import lru_cache
 from enum import Enum
 from viewer.toolbar_viewer import ToolbarViewer
 from viewer.utils import reshape_grid
-from typing import Dict
+from typing import Dict, Tuple
+import time
 
 from templates import *
 from templates_latent import *
@@ -62,6 +63,7 @@ class ModelViz(ToolbarViewer):
         self.check_dataclass(self.rend)
 
         self.G_lock = Lock()
+        self.rend.img_cache = {}
     
     @lru_cache()
     def init_model(self):
@@ -142,6 +144,20 @@ class ModelViz(ToolbarViewer):
 
         # Move on to next batch
         self.rend.i += 1
+
+        # Read from or write to cache
+        finished = [False]*s.B
+        for i, img in enumerate(self.rend.intermed):
+            key = (s.seed + i, s.T, s.lat_T)
+            if key in self.rend.img_cache:
+                self.rend.intermed[i] = torch.from_numpy(self.rend.img_cache[key]).cuda()
+                finished[i] = True
+            elif self.rend.i >= s.T:
+                self.rend.img_cache[key] = img.cpu().numpy()
+
+        # Early exit
+        if all(finished):
+            self.rend.i = s.T
         
         # Output updated grid
         return reshape_grid(0.5 * (self.rend.intermed + 1)) # => HWC
@@ -149,9 +165,9 @@ class ModelViz(ToolbarViewer):
     def draw_toolbar(self):
         s = self.state
         s.B = imgui.input_int('B', s.B)[1]
-        s.seed = imgui.input_int('Seed', s.seed, 1, s.B)[1]
-        s.T = imgui.input_int('T_img', s.T)[1]
-        s.lat_T = imgui.input_int('T_lat', s.lat_T)[1]
+        s.seed = max(0, imgui.input_int('Seed', s.seed, 1, s.B)[1])
+        s.T = imgui.input_int('T_img', s.T, 1, 10)[1]
+        s.lat_T = imgui.input_int('T_lat', s.lat_T, 1, 10)[1]
 
 class VizMode(int, Enum):
     SINGLE = 0 # single image
@@ -160,8 +176,8 @@ class VizMode(int, Enum):
 @dataclass
 class UIState:
     pkl: str = None
-    T: int = 20
-    lat_T: int = 20
+    T: int = 10
+    lat_T: int = 10
     seed: int = 0
     B: int = 1
 
@@ -178,6 +194,7 @@ class RendererState:
     lat_sampl: SpacedDiffusionBeatGans = None
     intermed: torch.Tensor = None
     lat: torch.Tensor = None
+    img_cache: Dict[Tuple[int, int, int], torch.Tensor] = None
     i: int = 0 # current computation progress
 
 def init_torch():
