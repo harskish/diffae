@@ -8,7 +8,7 @@ from copy import deepcopy
 from functools import lru_cache
 from enum import Enum
 from viewer.toolbar_viewer import ToolbarViewer
-from viewer.utils import reshape_grid
+from viewer.utils import reshape_grid, combo_box_vals
 from typing import Dict, Tuple
 from os import makedirs
 import time
@@ -66,12 +66,10 @@ class ModelViz(ToolbarViewer):
         self.check_dataclass(self.rend)
 
         self.G_lock = Lock()
-        self.rend.img_cache = {}
-        self.rend.lat_cache = {}
     
     @lru_cache()
-    def init_model(self):
-        conf = ffhq256_autoenc_latent()
+    def init_model(self, name):
+        conf = globals()[f'{name}_autoenc_latent']() #ffhq256_autoenc_latent()
         conf.seed = None
         conf.pretrain = None
 
@@ -110,7 +108,9 @@ class ModelViz(ToolbarViewer):
         # Only works for fields annotated with type (e.g. sliders: list)
         if self.rend.last_ui_state != s:
             self.rend.last_ui_state = s
-            self.rend.model = self.init_model()
+            self.rend.model = self.init_model(s.pkl)
+            self.rend.lat_cache = {}
+            self.rend.img_cache = {}
             self.update_samplers(s)
             self.rend.i = 0
             res = self.rend.model.conf.img_size
@@ -144,6 +144,7 @@ class ModelViz(ToolbarViewer):
 
         # Run diffusion one step forward
         model_kwargs = {'x_start': None, 'cond': torch.stack([self.rend.lat_cache[k] for k in keys], dim=0)}
+        
         t = th.tensor([s.T - self.rend.i - 1] * s.B, device='cuda', requires_grad=False)
         ret = self.rend.sampl.ddim_sample(
             ema_model,
@@ -156,8 +157,8 @@ class ModelViz(ToolbarViewer):
             eta=0.0,
         )
         self.rend.intermed = ret['sample']
-
-        # Move on to next batch
+        
+        # Move on to next iteration
         self.rend.i += 1
 
         # Read from or write to cache
@@ -183,6 +184,7 @@ class ModelViz(ToolbarViewer):
         s.seed = max(0, imgui.input_int('Seed', s.seed, s.B, 1)[1])
         s.T = imgui.input_int('T_img', s.T, 1, 10)[1]
         s.lat_T = imgui.input_int('T_lat', s.lat_T, 1, 10)[1]
+        s.pkl = combo_box_vals('Model', ['ffhq256', 'horse128'], s.pkl)[1]
 
 class VizMode(int, Enum):
     SINGLE = 0 # single image
@@ -190,7 +192,7 @@ class VizMode(int, Enum):
 # Volatile state: requires recomputation of results
 @dataclass
 class UIState:
-    pkl: str = None
+    pkl: str = 'ffhq256'
     T: int = 10
     lat_T: int = 10
     seed: int = 0
