@@ -79,12 +79,11 @@ class ModelViz(ToolbarViewer):
         model = LitModel(conf)
         state = torch.load(f'checkpoints/{conf.name}/last.ckpt', map_location='cpu')
         model.load_state_dict(state['state_dict'], strict=False)
-        model = model.to('cuda')
         
         return model
 
     def init_model(self, name):
-        model = self._get_model(name)
+        model = self._get_model(name).cuda()
 
         # Reset caches
         prev = self.rend.model
@@ -132,27 +131,35 @@ class ModelViz(ToolbarViewer):
         conf = self.rend.model.conf
         ema_model = self.rend.model.ema_model
 
-        # Sample latents
-        keys = [(s.seed + i, s.lat_T) for i in range(s.B)]
-        missing = [k[0] for k in keys if k not in self.rend.lat_cache]
-        if missing:
-            latent_noise = seeds_to_samples(missing, (len(missing), conf.style_ch)).cuda()
-            lats = self.rend.lat_sampl.sample(
-                model=ema_model.latent_net,
-                noise=latent_noise,
-                clip_denoised=conf.latent_clip_sample,
-                progress=False,
-            )
+        cond = None
+        if s.show_ds:
+            # Use dataset image latents
+            cond = self.rend.model.conds[s.seed:s.seed+s.B].cuda() # not normalized
+        else:
+            # Sample latents
+            keys = [(s.seed + i, s.lat_T) for i in range(s.B)]
+            missing = [k[0] for k in keys if k not in self.rend.lat_cache]
+            if missing:
+                latent_noise = seeds_to_samples(missing, (len(missing), conf.style_ch)).cuda()
+                lats = self.rend.lat_sampl.sample(
+                    model=ema_model.latent_net,
+                    noise=latent_noise,
+                    clip_denoised=conf.latent_clip_sample,
+                    progress=False,
+                )
 
-            if conf.latent_znormalize:
-                lats = lats * self.rend.model.conds_std.cuda() + self.rend.model.conds_mean.cuda()
+                # Avoid double normalization
+                if conf.latent_znormalize:
+                    lats = self.rend.model.denormalize(lats)
+                
+                # Update cache
+                for seed, lat in zip(missing, lats):
+                    self.rend.lat_cache[(seed, s.lat_T)] = lat
             
-            # Update cache
-            for seed, lat in zip(missing, lats):
-                self.rend.lat_cache[(seed, s.lat_T)] = lat
+            cond = torch.stack([self.rend.lat_cache[k] for k in keys], dim=0)
 
         # Run diffusion one step forward
-        model_kwargs = {'x_start': None, 'cond': torch.stack([self.rend.lat_cache[k] for k in keys], dim=0)}
+        model_kwargs = {'x_start': None, 'cond': cond}
         
         t = th.tensor([s.T - self.rend.i - 1] * s.B, device='cuda', requires_grad=False)
         ret = self.rend.sampl.ddim_sample(
@@ -173,7 +180,7 @@ class ModelViz(ToolbarViewer):
         # Read from or write to cache
         finished = [False]*s.B
         for i, img in enumerate(self.rend.intermed):
-            key = (s.seed + i, s.T, s.lat_T)
+            key = (s.show_ds, s.seed + i, s.T, s.lat_T)
             if key in self.rend.img_cache:
                 self.rend.intermed[i] = torch.from_numpy(self.rend.img_cache[key]).cuda()
                 finished[i] = True
@@ -191,6 +198,7 @@ class ModelViz(ToolbarViewer):
         s = self.state
         s.B = imgui.input_int('B', s.B)[1]
         s.seed = max(0, imgui.input_int('Seed', s.seed, s.B, 1)[1])
+        s.show_ds = imgui.checkbox('Dataset latents', s.show_ds)[1]
         s.T = imgui.input_int('T_img', s.T, 1, 10)[1]
         s.lat_T = imgui.input_int('T_lat', s.lat_T, 1, 10)[1]
         s.pkl = combo_box_vals('Model', ['ffhq256', 'horse128', 'bedroom128'], s.pkl)[1]
@@ -206,6 +214,7 @@ class UIState:
     lat_T: int = 10
     seed: int = 0
     B: int = 1
+    show_ds: bool = False
 
 # Non-volatile (soft) state: does not require recomputation
 @dataclass
@@ -219,7 +228,7 @@ class RendererState:
     sampl: SpacedDiffusionBeatGans = None
     lat_sampl: SpacedDiffusionBeatGans = None
     intermed: torch.Tensor = None
-    img_cache: Dict[Tuple[int, int, int], torch.Tensor] = None
+    img_cache: Dict[Tuple[bool, int, int, int], torch.Tensor] = None
     lat_cache: Dict[Tuple[int, int], torch.Tensor] = None
     i: int = 0 # current computation progress
 
