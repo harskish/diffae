@@ -68,8 +68,8 @@ class ModelViz(ToolbarViewer):
         self.G_lock = Lock()
     
     @lru_cache()
-    def init_model(self, name):
-        conf = globals()[f'{name}_autoenc_latent']() #ffhq256_autoenc_latent()
+    def _get_model(self, name):
+        conf = globals()[f'{name}_autoenc_latent']()
         conf.seed = None
         conf.pretrain = None
 
@@ -80,6 +80,17 @@ class ModelViz(ToolbarViewer):
         state = torch.load(f'checkpoints/{conf.name}/last.ckpt', map_location='cpu')
         model.load_state_dict(state['state_dict'], strict=False)
         model = model.to('cuda')
+        
+        return model
+
+    def init_model(self, name):
+        model = self._get_model(name)
+
+        # Reset caches
+        prev = self.rend.model
+        if not prev or model.conf.name != prev.conf.name:
+            self.rend.lat_cache = {}
+            self.rend.img_cache = {}
 
         return model
 
@@ -109,8 +120,6 @@ class ModelViz(ToolbarViewer):
         if self.rend.last_ui_state != s:
             self.rend.last_ui_state = s
             self.rend.model = self.init_model(s.pkl)
-            self.rend.lat_cache = {}
-            self.rend.img_cache = {}
             self.update_samplers(s)
             self.rend.i = 0
             res = self.rend.model.conf.img_size
@@ -184,7 +193,7 @@ class ModelViz(ToolbarViewer):
         s.seed = max(0, imgui.input_int('Seed', s.seed, s.B, 1)[1])
         s.T = imgui.input_int('T_img', s.T, 1, 10)[1]
         s.lat_T = imgui.input_int('T_lat', s.lat_T, 1, 10)[1]
-        s.pkl = combo_box_vals('Model', ['ffhq256', 'horse128'], s.pkl)[1]
+        s.pkl = combo_box_vals('Model', ['ffhq256', 'horse128', 'bedroom128'], s.pkl)[1]
 
 class VizMode(int, Enum):
     SINGLE = 0 # single image
@@ -192,7 +201,7 @@ class VizMode(int, Enum):
 # Volatile state: requires recomputation of results
 @dataclass
 class UIState:
-    pkl: str = 'ffhq256'
+    pkl: str = 'bedroom128'
     T: int = 10
     lat_T: int = 10
     seed: int = 0
