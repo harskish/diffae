@@ -58,11 +58,9 @@ class ModelViz(ToolbarViewer):
 
     def setup_state(self):
         self.state = UIState()
-        self.state_soft = UIStateSoft()
         self.rend = RendererState()
         
         self.check_dataclass(self.state)
-        self.check_dataclass(self.state_soft)
         self.check_dataclass(self.rend)
 
         self.G_lock = Lock()
@@ -93,17 +91,17 @@ class ModelViz(ToolbarViewer):
 
         return model
 
+    # Relax even spacing constraint
     def update_samplers(self, s):
-        self.rend.model.conf.T_eval = max(2, s.T)
-        self.rend.model.conf.latent_T_eval = max(2, s.lat_T) # not used?
-        self.rend.sampl = self.rend.model.conf._make_diffusion_conf(max(2, s.T)).make_sampler()
-        # Latent sampler T must be divisible by 1000
-        while self.state.lat_T <= self.rend.model.conf.T:
-            try:
-                self.rend.lat_sampl = self.rend.model.conf._make_latent_diffusion_conf(max(2, self.state.lat_T)).make_sampler()
-                break
-            except ValueError:
-                self.state.lat_T += 1
+        T = self.rend.model.conf.T
+
+        conf_img = self.rend.model.conf._make_diffusion_conf(T)
+        conf_img.use_timesteps = np.linspace(0, T, s.T + 1, dtype=np.int32).tolist()[:-1]
+        self.rend.sampl = conf_img.make_sampler()
+
+        conf_lat = self.rend.model.conf._make_latent_diffusion_conf(T)
+        conf_lat.use_timesteps = np.linspace(0, T, s.lat_T + 1, dtype=np.int32).tolist()[:-1]
+        self.rend.lat_sampl = conf_lat.make_sampler()
 
     # Progress bar below images
     def draw_output_extra(self):
@@ -203,9 +201,6 @@ class ModelViz(ToolbarViewer):
         s.lat_T = imgui.input_int('T_lat', s.lat_T, 1, 10)[1]
         s.pkl = combo_box_vals('Model', ['ffhq256', 'horse128', 'bedroom128'], s.pkl)[1]
 
-class VizMode(int, Enum):
-    SINGLE = 0 # single image
-
 # Volatile state: requires recomputation of results
 @dataclass
 class UIState:
@@ -215,11 +210,6 @@ class UIState:
     seed: int = 0
     B: int = 1
     show_ds: bool = False
-
-# Non-volatile (soft) state: does not require recomputation
-@dataclass
-class UIStateSoft:
-    video_mode: VizMode = VizMode.SINGLE
 
 @dataclass
 class RendererState:
