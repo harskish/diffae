@@ -96,11 +96,11 @@ class ModelViz(ToolbarViewer):
         T = self.rend.model.conf.T
 
         conf_img = self.rend.model.conf._make_diffusion_conf(T)
-        conf_img.use_timesteps = np.linspace(0, T, s.T + 1, dtype=np.int32).tolist()[:-1]
+        conf_img.use_timesteps = np.linspace(0, T, max(2, s.T) + 1, dtype=np.int32).tolist()[:-1]
         self.rend.sampl = conf_img.make_sampler()
 
         conf_lat = self.rend.model.conf._make_latent_diffusion_conf(T)
-        conf_lat.use_timesteps = np.linspace(0, T, s.lat_T + 1, dtype=np.int32).tolist()[:-1]
+        conf_lat.use_timesteps = np.linspace(0, T, max(2, s.lat_T) + 1, dtype=np.int32).tolist()[:-1]
         self.rend.lat_sampl = conf_lat.make_sampler()
 
     # Progress bar below images
@@ -204,7 +204,7 @@ class ModelViz(ToolbarViewer):
 # Volatile state: requires recomputation of results
 @dataclass
 class UIState:
-    pkl: str = 'bedroom128'
+    pkl: str = 'ffhq256'
     T: int = 10
     lat_T: int = 10
     seed: int = 0
