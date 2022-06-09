@@ -25,6 +25,7 @@ from metrics import *
 from renderer import *
 
 args = None
+model_opts = ['bedroom128', 'horse128', 'ffhq256']
 
 def sample_seeds(N, base=None):
     if base is None:
@@ -63,6 +64,7 @@ class ModelViz(ToolbarViewer):
         self.check_dataclass(self.state)
         self.check_dataclass(self.rend)
 
+        self.state.pkl = args.model
         self.G_lock = Lock()
     
     @lru_cache()
@@ -199,12 +201,12 @@ class ModelViz(ToolbarViewer):
         s.show_ds = imgui.checkbox('Dataset latents', s.show_ds)[1]
         s.T = imgui.input_int('T_img', s.T, 1, 10)[1]
         s.lat_T = imgui.input_int('T_lat', s.lat_T, 1, 10)[1]
-        s.pkl = combo_box_vals('Model', ['ffhq256', 'horse128', 'bedroom128'], s.pkl)[1]
+        s.pkl = combo_box_vals('Model', model_opts, s.pkl)[1]
 
 # Volatile state: requires recomputation of results
 @dataclass
 class UIState:
-    pkl: str = 'ffhq256'
+    pkl: str = None
     T: int = 10
     lat_T: int = 10
     seed: int = 0
@@ -244,9 +246,10 @@ def download_models():
             gdown.download(id=id, output=str(pth), quiet=False)
 
 if __name__ == '__main__':
-    # parser = argparse.ArgumentParser(description='DiffAE visualizer')
-    # parser.add_argument('input', type=str, help='Model ckpt')
-    # args = parser.parse_args()
+    parser = argparse.ArgumentParser(description='DiffAE visualizer')
+    parser.add_argument('model', type=str, help='Model name [bedroom128  / horse128 / ffhq256]')
+    args = parser.parse_args()
+    assert args.model in model_opts, f'Unknown model {args.model}'
 
     download_models()
     init_torch()
