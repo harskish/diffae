@@ -143,11 +143,7 @@ class _WrappedModel:
                                dtype=t.dtype)
 
         def do(t):
-            # TODO: should land soon (https://github.com/kulinseth/pytorch/tree/mps_master)
-            if t.device.type == 'mps':
-                new_ts = map_tensor.cpu()[t.cpu()].to(t.device)
-            else:
-                new_ts = map_tensor.to(t.device)[t] # TODO: remove map_tensor to
+            new_ts = map_tensor[t]
             if self.rescale_timesteps:
                 new_ts = new_ts.float() * (1000.0 / self.original_num_steps)
             return new_ts

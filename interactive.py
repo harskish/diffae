@@ -99,7 +99,6 @@ class ModelViz(ToolbarViewer):
             self.rend.lat_cache = {}
             self.rend.img_cache = {}
 
-        print('Model loaded')
         return model
 
     # Relax even spacing constraint
