@@ -28,12 +28,12 @@ args = None
 model_opts = ['bedroom128', 'horse128', 'ffhq256']
 
 # Choose backend
-device = 'mps'
-#if torch.cuda.is_available():
-#    device = 'cuda'
-#mps = getattr(torch.backends, 'mps')
-#if mps and mps.is_available() and mps.is_built():
-#    device = 'mps'
+device = 'cpu'
+if torch.cuda.is_available():
+    device = 'cuda'
+mps = getattr(torch.backends, 'mps', None)
+if mps and mps.is_available() and mps.is_built():
+    device = 'mps'
 
 def sample_seeds(N, base=None):
     if base is None:
@@ -100,6 +100,7 @@ class ModelViz(ToolbarViewer):
             self.rend.lat_cache = {}
             self.rend.img_cache = {}
 
+        print('Model loaded')
         return model
 
     # Relax even spacing constraint
@@ -135,7 +136,6 @@ class ModelViz(ToolbarViewer):
 
         # Check if work is done
         if self.rend.i >= s.T:
-            grid = reshape_grid(0.5 * (self.rend.intermed + 1)) # => HWC
             return None
 
         conf = self.rend.model.conf

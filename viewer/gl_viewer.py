@@ -229,6 +229,8 @@ class viewer:
         glfw.set_window_pos(self._window, *self.window_pos)
         glfw.make_context_current(self._window)
 
+        print('GL context:', gl.glGetString(gl.GL_VERSION).decode('utf8'))
+
         self._cuda_context = None
         if has_pycuda:
             pycuda.driver.init()
