@@ -71,7 +71,6 @@ class ModelViz(ToolbarViewer):
         
         self.check_dataclass(self.state)
         self.check_dataclass(self.rend)
-
         self.state.pkl = args.model
         self.G_lock = Lock()
     
@@ -262,9 +261,6 @@ if __name__ == '__main__':
     parser.add_argument('model', type=str, help='Model name [bedroom128  / horse128 / ffhq256]')
     args = parser.parse_args()
     assert args.model in model_opts, f'Unknown model {args.model}'
-
-    import OpenGL
-    print(OpenGL.extensions.hasGLExtension( OpenGL.raw.GL.VERSION.GL_2_0._EXTENSION_NAME ))
 
     download_models()
     init_torch()

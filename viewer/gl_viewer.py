@@ -215,10 +215,10 @@ class viewer:
         
         # MacOS requires forward-compatible core profile
         if 'darwin' in platform:
-            glfw.window_hint(glfw.CONTEXT_VERSION_MAJOR, 4)
-            glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, 1)
+            glfw.window_hint(glfw.CONTEXT_VERSION_MAJOR, 3)
+            glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, 3)
             glfw.window_hint(glfw.OPENGL_PROFILE, glfw.OPENGL_CORE_PROFILE)
-            glfw.window_hint(glfw.OPENGL_FORWARD_COMPAT, glfw.TRUE)
+            glfw.window_hint(glfw.OPENGL_FORWARD_COMPAT, gl.GL_TRUE)
 
         if self.fullscreen:
             monitor = glfw.get_monitors()[0]
@@ -226,9 +226,12 @@ class viewer:
             self._window = glfw.create_window(params.size.width, params.size.height, title, monitor, None)
         else:
             self._window = glfw.create_window(self._width, self._height, title, None, None)
+        
+        if not self._window:
+            raise RuntimeError('Could not create window')
+
         glfw.set_window_pos(self._window, *self.window_pos)
         glfw.make_context_current(self._window)
-
         print('GL context:', gl.glGetString(gl.GL_VERSION).decode('utf8'))
 
         self._cuda_context = None
@@ -384,10 +387,9 @@ class viewer:
         for i in range(len(workers)):
             workers[i].start()
 
-        #imgui.create_context()
-        self.set_ui_scale(self.ui_scale)
-
-        self._lock()
+        self.set_ui_scale(self.ui_scale)        
+        
+        self._lock() # calls make_context_current()
         impl = GlfwRenderer(self._window)
         self._unlock()
         
@@ -415,8 +417,11 @@ class viewer:
             glfw.poll_events()
             impl.process_inputs()
 
-            self._lock()
-            imgui.get_io().display_size = glfw.get_framebuffer_size(self._window)
+            self._lock() # calls make_context_current()
+            
+            # Breaks on MacOS. Needed?
+            #imgui.get_io().display_size = glfw.get_framebuffer_size(self._window)
+            
             imgui.new_frame()
 
             # Tero viewer:
@@ -431,9 +436,12 @@ class viewer:
             imgui.pop_font()
 
             imgui.render()
+            
+            gl.glClearColor(0, 0, 0, 1)
+            gl.glClear(gl.GL_COLOR_BUFFER_BIT)
+
             impl.render(imgui.get_draw_data())
             glfw.swap_buffers(self._window)
-            gl.glClear(gl.GL_COLOR_BUFFER_BIT)
 
             self._unlock()
         
