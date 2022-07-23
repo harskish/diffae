@@ -1,6 +1,7 @@
 import math
 from dataclasses import dataclass
 from enum import Enum
+from os import times
 from typing import NamedTuple, Tuple
 
 import torch
@@ -107,15 +108,27 @@ class MLPSkipNet(nn.Module):
         self.last_act = conf.last_act.get_act()
 
     def forward(self, x, t, **kwargs):
-        t = timestep_embedding(t, self.conf.num_time_emb_channels)
+        t1 = timestep_embedding(t, self.conf.num_time_emb_channels)
+        #t_ = timestep_embedding(t.cpu(),  self.conf.num_time_emb_channels)
+        #assert th.allclose(t1.cpu(), t_, rtol=1e-3), 'Differ!'
+
+        t = t1
         cond = self.time_embed(t)
+        cond_ = self.cpu().time_embed(t.cpu())
+        assert th.allclose(cond.cpu(), cond_, rtol=1e-3)
         h = x
         for i in range(len(self.layers)):
             if i in self.conf.skip_layers:
                 # injecting input into the hidden layers
                 h = torch.cat([h, x], dim=1)
-            h = self.layers[i].forward(x=h, cond=cond)
-        h = self.last_act(h)
+            h1 = self.to(x.device).layers[i].forward(x=h.to(x.device), cond=cond.to(x.device))
+            #h_ = self.cpu().layers[i].forward(x=h.cpu(), cond=cond.cpu())
+            #assert th.allclose(h1.cpu(), h_, rtol=1e-3), 'Differ'
+            h = h1
+        h1 = self.last_act(h)
+        #h_ = self.cpu().last_act(h.cpu())
+        #assert th.allclose(h1.cpu(), h_, rtol=1e-3), 'Differ'
+        h = h1
         return LatentNetReturn(h)
 
 

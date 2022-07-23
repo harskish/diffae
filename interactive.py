@@ -27,6 +27,14 @@ from renderer import *
 args = None
 model_opts = ['bedroom128', 'horse128', 'ffhq256']
 
+# Choose backend
+device = 'mps'
+#if torch.cuda.is_available():
+#    device = 'cuda'
+#mps = getattr(torch.backends, 'mps')
+#if mps and mps.is_available() and mps.is_built():
+#    device = 'mps'
+
 def sample_seeds(N, base=None):
     if base is None:
         base = np.random.randint(np.iinfo(np.int32).max - N)
@@ -45,9 +53,9 @@ def seeds_to_samples(seeds, shape=(1, 512)):
     return torch.tensor(latents)
 
 class ModelViz(ToolbarViewer):    
-    def __init__(self, name, batch_mode=False):
+    def __init__(self, name, batch_mode=False, hidden=False):
         self.batch_mode = batch_mode
-        super().__init__(name, batch_mode=batch_mode)
+        super().__init__(name, batch_mode=batch_mode, hidden=hidden)
     
     # Check for missing type annotations (break by-value comparisons)
     def check_dataclass(self, obj):
@@ -72,6 +80,7 @@ class ModelViz(ToolbarViewer):
         conf = globals()[f'{name}_autoenc_latent']()
         conf.seed = None
         conf.pretrain = None
+        conf.fp16 = (device != 'mps')
 
         assert conf.train_mode == TrainMode.latent_diffusion
         assert conf.model_type.has_autoenc()
@@ -83,7 +92,7 @@ class ModelViz(ToolbarViewer):
         return model
 
     def init_model(self, name):
-        model = self._get_model(name).cuda()
+        model = self._get_model(name).to(device)
 
         # Reset caches
         prev = self.rend.model
@@ -122,10 +131,11 @@ class ModelViz(ToolbarViewer):
             self.update_samplers(s)
             self.rend.i = 0
             res = self.rend.model.conf.img_size
-            self.rend.intermed = sample_normal((s.B, 3, res, res), s.seed).cuda() # spaial noise
+            self.rend.intermed = sample_normal((s.B, 3, res, res), s.seed).to(device) # spaial noise
 
         # Check if work is done
         if self.rend.i >= s.T:
+            grid = reshape_grid(0.5 * (self.rend.intermed + 1)) # => HWC
             return None
 
         conf = self.rend.model.conf
@@ -134,13 +144,13 @@ class ModelViz(ToolbarViewer):
         cond = None
         if s.show_ds:
             # Use dataset image latents
-            cond = self.rend.model.conds[s.seed:s.seed+s.B].cuda() # not normalized
+            cond = self.rend.model.conds[s.seed:s.seed+s.B].to(device) # not normalized
         else:
             # Sample latents
             keys = [(s.seed + i, s.lat_T) for i in range(s.B)]
             missing = [k[0] for k in keys if k not in self.rend.lat_cache]
             if missing:
-                latent_noise = seeds_to_samples(missing, (len(missing), conf.style_ch)).cuda()
+                latent_noise = seeds_to_samples(missing, (len(missing), conf.style_ch)).to(device)
                 lats = self.rend.lat_sampl.sample(
                     model=ema_model.latent_net,
                     noise=latent_noise,
@@ -161,7 +171,7 @@ class ModelViz(ToolbarViewer):
         # Run diffusion one step forward
         model_kwargs = {'x_start': None, 'cond': cond}
         
-        t = th.tensor([s.T - self.rend.i - 1] * s.B, device='cuda', requires_grad=False)
+        t = th.tensor([s.T - self.rend.i - 1] * s.B, device=device, requires_grad=False)
         ret = self.rend.sampl.ddim_sample(
             ema_model,
             self.rend.intermed,
@@ -182,7 +192,7 @@ class ModelViz(ToolbarViewer):
         for i, img in enumerate(self.rend.intermed):
             key = (s.show_ds, s.seed + i, s.T, s.lat_T)
             if key in self.rend.img_cache:
-                self.rend.intermed[i] = torch.from_numpy(self.rend.img_cache[key]).cuda()
+                self.rend.intermed[i] = torch.tensor(self.rend.img_cache[key], device=device)
                 finished[i] = True
             elif self.rend.i >= s.T:
                 self.rend.img_cache[key] = img.cpu().numpy()
@@ -192,7 +202,9 @@ class ModelViz(ToolbarViewer):
             self.rend.i = s.T
         
         # Output updated grid
-        return reshape_grid(0.5 * (self.rend.intermed + 1)) # => HWC
+        grid = reshape_grid(0.5 * (self.rend.intermed + 1)) # => HWC
+        #Image.fromarray(np.uint8(255*grid.cpu().numpy())).show()
+        return grid if device == 'cuda' else grid.cpu().numpy()
     
     def draw_toolbar(self):
         s = self.state
@@ -251,7 +263,10 @@ if __name__ == '__main__':
     args = parser.parse_args()
     assert args.model in model_opts, f'Unknown model {args.model}'
 
+    import OpenGL
+    print(OpenGL.extensions.hasGLExtension( OpenGL.raw.GL.VERSION.GL_2_0._EXTENSION_NAME ))
+
     download_models()
     init_torch()
-    viewer = ModelViz('diffae_viewer')
+    viewer = ModelViz('diffae_viewer', hidden=False)
     print('Done')

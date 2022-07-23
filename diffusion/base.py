@@ -5,6 +5,9 @@ https://github.com/hojonathanho/diffusion/blob/1e0dceb3b3495bbe19116a5e1b3596cd0
 Docstrings have been added, as well as DDIM sampling and a new collection of beta schedules.
 """
 
+from copy import deepcopy
+from sqlite3 import Timestamp
+from statistics import mode
 from model.unet_autoenc import AutoencReturn
 from config_base import BaseConfig
 import enum
@@ -303,10 +306,13 @@ class GaussianDiffusionBeatGans:
 
         B, C = x.shape[:2]
         assert t.shape == (B, )
-        with autocast(self.conf.fp16):
-            model_forward = model.forward(x=x,
-                                          t=self._scale_timesteps(t),
-                                          **model_kwargs)
+        #with autocast(self.conf.fp16):
+        # Consistency checked within forward
+        model_forward = model.forward(x=x, t=self._scale_timesteps(t), **model_kwargs)
+        #model1 = model.cpu()
+        #model_forward_ = model1.forward(x=x.cpu(), t=self._scale_timesteps(t.cpu()), **model_kwargs)
+        #model = model1.to('mps')
+        #assert np.allclose(model_forward.pred.cpu(), model_forward_.pred, rtol=1e-3), 'Differ'
         model_output = model_forward.pred
 
         if self.model_var_type in [
@@ -325,7 +331,7 @@ class GaussianDiffusionBeatGans:
                     self.posterior_log_variance_clipped,
                 ),
             }[self.model_var_type]
-            model_variance = _extract_into_tensor(model_variance, t, x.shape)
+            model_variance = _extract_into_tensor(model_variance, t, x.shape) # MPS: breaks
             model_log_variance = _extract_into_tensor(model_log_variance, t,
                                                       x.shape)
 
@@ -380,6 +386,7 @@ class GaussianDiffusionBeatGans:
             self.sqrt_recip_alphas_cumprod, t, scaled_xstart.shape)
 
     def _predict_eps_from_xstart(self, x_t, t, pred_xstart):
+        # MPS: 0/0, xt!=0, pred_xstart=0
         return (_extract_into_tensor(self.sqrt_recip_alphas_cumprod, t,
                                      x_t.shape) * x_t -
                 pred_xstart) / _extract_into_tensor(
@@ -605,6 +612,19 @@ class GaussianDiffusionBeatGans:
             denoised_fn=denoised_fn,
             model_kwargs=model_kwargs,
         )
+        #from copy import deepcopy
+        #_out = self.p_mean_variance(
+        #    deepcopy(model).cpu(),
+        #    x.cpu(),
+        #    t.cpu(),
+        #    clip_denoised=clip_denoised,
+        #    denoised_fn=denoised_fn,
+        #    model_kwargs=model_kwargs,
+        #)
+        #for k in out.keys():
+        #    if th.is_tensor(out[k]):
+        #        assert th.allclose(out[k].cpu(), _out[k].cpu(), rtol=1e-2), f'{k} differs'
+
         if cond_fn is not None:
             out = self.condition_score(cond_fn,
                                        out,
@@ -614,6 +634,9 @@ class GaussianDiffusionBeatGans:
 
         # Usually our model outputs epsilon, but we re-derive it
         # in case we used x_start or x_prev prediction.
+        
+        # MPS: x is NOT zero...
+        assert out["pred_xstart"].abs().sum() != 0, 'All zeros...'
         eps = self._predict_eps_from_xstart(x, t, out["pred_xstart"])
 
         alpha_bar = _extract_into_tensor(self.alphas_cumprod, t, x.shape)
@@ -941,7 +964,14 @@ def _extract_into_tensor(arr, timesteps, broadcast_shape):
                             dimension equal to the length of timesteps.
     :return: a tensor of shape [batch_size, 1, ...] where the shape has K dims.
     """
-    res = th.from_numpy(arr).to(device=timesteps.device)[timesteps].float()
+    # TODO: remove
+    if timesteps.device.type == 'mps':
+        # TODO: from_numpy breaks when using .unsqueeze(), [None], view()
+        ref = th.from_numpy(arr).to('cpu')[timesteps.cpu()].float()
+        res = th.tensor(arr[timesteps.item()]).float().to(device=timesteps.device)
+        assert th.allclose(ref, res.cpu())
+    else:
+        res = th.from_numpy(arr).to(device=timesteps.device)[timesteps].float()
     while len(res.shape) < len(broadcast_shape):
         res = res[..., None]
     return res.expand(broadcast_shape)

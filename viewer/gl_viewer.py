@@ -7,6 +7,7 @@ import multiprocessing as mp
 from pathlib import Path
 from urllib.request import urlretrieve
 import os
+from sys import platform
 
 import imgui.core
 from imgui.integrations.glfw import GlfwRenderer
@@ -16,6 +17,10 @@ glfw.ERROR_REPORTING = 'raise' # make sure errors don't get swallowed
 
 import OpenGL.GL as gl
 import torch
+
+cuda_synchronize = lambda : None
+if torch.cuda.is_available():
+    cuda_synchronize = torch.cuda.synchronize
 
 has_pycuda = False
 try:
@@ -127,7 +132,7 @@ class _texture:
 
         # cleanup
         tex_data.unmap()
-        torch.cuda.synchronize()
+        cuda_synchronize()
 
 class _editable:
     def __init__(self, name, ui_code = '', run_code = ''):
@@ -180,7 +185,9 @@ class viewer:
         fname = inifile or "".join(c for c in title.lower() if c.isalnum())
         self._inifile = Path(fname).with_suffix('.ini')
 
-        glfw.init()
+        if not glfw.init():
+            raise RuntimeError('GLFW init failed')
+        
         try:
             with open(self._inifile, 'r') as file:
                 self._width, self._height = [int(i) for i in file.readline().split()]
@@ -205,6 +212,13 @@ class viewer:
 
         glfw.window_hint(glfw.MAXIMIZED, start_maximized)
         glfw.window_hint(glfw.VISIBLE, not hidden)
+        
+        # MacOS requires forward-compatible core profile
+        if 'darwin' in platform:
+            glfw.window_hint(glfw.CONTEXT_VERSION_MAJOR, 4)
+            glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, 1)
+            glfw.window_hint(glfw.OPENGL_PROFILE, glfw.OPENGL_CORE_PROFILE)
+            glfw.window_hint(glfw.OPENGL_FORWARD_COMPAT, glfw.TRUE)
 
         if self.fullscreen:
             monitor = glfw.get_monitors()[0]
@@ -465,7 +479,7 @@ class viewer:
     def upload_image_torch(self, name, tensor):
         assert isinstance(tensor, torch.Tensor)
         if self._lock():
-            torch.cuda.synchronize()
+            cuda_synchronize()
             if not self.quit:
                 self.push_context() # set the context for whichever thread wants to upload
                 if name not in self._images:
@@ -477,7 +491,7 @@ class viewer:
     # Upload data from cuda pointer retrieved using custom TF op 
     def upload_image_TF_ptr(self, name, ptr, shape):
         if self._lock():
-            torch.cuda.synchronize()
+            cuda_synchronize()
             if not self.quit:
                 self.push_context() # set the context for whichever thread wants to upload
                 if name not in self._images:
@@ -489,7 +503,7 @@ class viewer:
     def upload_image_np(self, name, data):
         assert isinstance(data, np.ndarray)
         if self._lock():
-            torch.cuda.synchronize()
+            cuda_synchronize()
             if not self.quit:
                 self.push_context() # set the context for whichever thread wants to upload
                 if name not in self._images:

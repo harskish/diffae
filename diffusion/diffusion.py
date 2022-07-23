@@ -1,3 +1,5 @@
+from hashlib import new
+import torch
 from .base import *
 from dataclasses import dataclass
 
@@ -141,7 +143,13 @@ class _WrappedModel:
                                dtype=t.dtype)
 
         def do(t):
-            new_ts = map_tensor[t]
+            # TODO: should land soon (https://github.com/kulinseth/pytorch/tree/mps_master)
+            if t.device.type == 'mps':
+                ref = map_tensor.cpu()[t.cpu()]
+                new_ts = map_tensor[t.item()].view(1)
+                assert torch.allclose(ref, new_ts.cpu())
+            else:
+                new_ts = map_tensor.to(t.device)[t] # TODO: remove map_tensor to
             if self.rescale_timesteps:
                 new_ts = new_ts.float() * (1000.0 / self.original_num_steps)
             return new_ts
@@ -150,7 +158,13 @@ class _WrappedModel:
             # support t_cond
             t_cond = do(t_cond)
 
-        return self.model(x=x, t=do(t), t_cond=t_cond, **kwargs)
+        r1 = self.model(x=x, t=do(t), t_cond=t_cond, **kwargs)
+        #r1_ = self.model.cpu()(x=x.cpu(), t=do(t.cpu()), t_cond=t_cond, **kwargs)
+        #assert th.allclose(r1.pred.cpu(), r1_.pred, rtol=1e-3), 'Differ'
+
+        #self.model = self.model.to(x.device)
+
+        return r1
 
     def __getattr__(self, name):
         # allow for calling the model's methods
