@@ -145,7 +145,7 @@ class _WrappedModel:
         def do(t):
             # TODO: should land soon (https://github.com/kulinseth/pytorch/tree/mps_master)
             if t.device.type == 'mps':
-                new_ts = map_tensor[t.item()].view(1).clone()
+                new_ts = map_tensor.cpu()[t.cpu()].to(t.device)
             else:
                 new_ts = map_tensor.to(t.device)[t] # TODO: remove map_tensor to
             if self.rescale_timesteps:
