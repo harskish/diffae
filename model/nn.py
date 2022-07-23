@@ -120,13 +120,8 @@ def timestep_embedding(timesteps, dim, max_period=10000):
     freqs = th.exp(-math.log(max_period) *
                    th.arange(start=0, end=half, dtype=th.float32) /
                    half).to(device=timesteps.device)
-    # TODO: int64 => float on mps gives garbage...
-    args = timesteps[:, None].cpu().float().to(timesteps.device) * freqs[None]
-    #args_ = timesteps.cpu()[:, None].float() * freqs.cpu()[None]
-    #assert th.allclose(args.cpu(), args_), 'Differ'
+    args = timesteps[:, None].float() * freqs[None]
     embedding = th.cat([th.cos(args), th.sin(args)], dim=-1)
-    #embedding_ = th.cat([th.cos(args.cpu()), th.sin(args.cpu())], dim=-1)
-    #assert th.allclose(embedding.cpu(), embedding_, rtol=1e-3), 'Differ'
     if dim % 2:
         embedding = th.cat(
             [embedding, th.zeros_like(embedding[:, :1])], dim=-1)

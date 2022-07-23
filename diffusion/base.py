@@ -306,14 +306,9 @@ class GaussianDiffusionBeatGans:
 
         B, C = x.shape[:2]
         assert t.shape == (B, )
-        #with autocast(self.conf.fp16):
-        # Consistency checked within forward
-        model_forward = model.forward(x=x, t=self._scale_timesteps(t), **model_kwargs)
-        #model1 = model.cpu()
-        #model_forward_ = model1.forward(x=x.cpu(), t=self._scale_timesteps(t.cpu()), **model_kwargs)
-        #model = model1.to('mps')
-        #assert np.allclose(model_forward.pred.cpu(), model_forward_.pred, rtol=1e-3), 'Differ'
-        model_output = model_forward.pred
+        with autocast(self.conf.fp16):
+            model_forward = model.forward(x=x, t=self._scale_timesteps(t), **model_kwargs)
+            model_output = model_forward.pred
 
         if self.model_var_type in [
                 ModelVarType.fixed_large, ModelVarType.fixed_small
@@ -612,18 +607,6 @@ class GaussianDiffusionBeatGans:
             denoised_fn=denoised_fn,
             model_kwargs=model_kwargs,
         )
-        #from copy import deepcopy
-        #_out = self.p_mean_variance(
-        #    deepcopy(model).cpu(),
-        #    x.cpu(),
-        #    t.cpu(),
-        #    clip_denoised=clip_denoised,
-        #    denoised_fn=denoised_fn,
-        #    model_kwargs=model_kwargs,
-        #)
-        #for k in out.keys():
-        #    if th.is_tensor(out[k]):
-        #        assert th.allclose(out[k].cpu(), _out[k].cpu(), rtol=1e-2), f'{k} differs'
 
         if cond_fn is not None:
             out = self.condition_score(cond_fn,
@@ -967,9 +950,7 @@ def _extract_into_tensor(arr, timesteps, broadcast_shape):
     # TODO: remove
     if timesteps.device.type == 'mps':
         # TODO: from_numpy breaks when using .unsqueeze(), [None], view()
-        ref = th.from_numpy(arr).to('cpu')[timesteps.cpu()].float()
         res = th.tensor(arr[timesteps.item()]).float().to(device=timesteps.device)
-        assert th.allclose(ref, res.cpu())
     else:
         res = th.from_numpy(arr).to(device=timesteps.device)[timesteps].float()
     while len(res.shape) < len(broadcast_shape):

@@ -145,9 +145,7 @@ class _WrappedModel:
         def do(t):
             # TODO: should land soon (https://github.com/kulinseth/pytorch/tree/mps_master)
             if t.device.type == 'mps':
-                ref = map_tensor.cpu()[t.cpu()]
-                new_ts = map_tensor[t.item()].view(1)
-                assert torch.allclose(ref, new_ts.cpu())
+                new_ts = map_tensor[t.item()].view(1).clone()
             else:
                 new_ts = map_tensor.to(t.device)[t] # TODO: remove map_tensor to
             if self.rescale_timesteps:
@@ -158,13 +156,7 @@ class _WrappedModel:
             # support t_cond
             t_cond = do(t_cond)
 
-        r1 = self.model(x=x, t=do(t), t_cond=t_cond, **kwargs)
-        #r1_ = self.model.cpu()(x=x.cpu(), t=do(t.cpu()), t_cond=t_cond, **kwargs)
-        #assert th.allclose(r1.pred.cpu(), r1_.pred, rtol=1e-3), 'Differ'
-
-        #self.model = self.model.to(x.device)
-
-        return r1
+        return self.model(x=x, t=do(t), t_cond=t_cond, **kwargs)
 
     def __getattr__(self, name):
         # allow for calling the model's methods
