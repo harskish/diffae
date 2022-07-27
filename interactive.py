@@ -2,27 +2,22 @@ import os
 import imgui
 import torch
 import argparse
+import numpy as np
 from multiprocessing import Lock
 from dataclasses import dataclass
 from copy import deepcopy
 from functools import lru_cache
-from enum import Enum
 from viewer.toolbar_viewer import ToolbarViewer
 from viewer.utils import reshape_grid, combo_box_vals
 from typing import Dict, Tuple
 from os import makedirs
-import time
 from pathlib import Path
 import gdown
 
-from templates import *
-from templates_latent import *
-from config import *
-from dataset import *
-from dist_utils import *
-from lmdb_writer import *
-from metrics import *
-from renderer import *
+import templates_latent
+from templates import LitModel
+from config import TrainMode
+from diffusion import SpacedDiffusionBeatGans
 
 args = None
 model_opts = ['bedroom128', 'horse128', 'ffhq256']
@@ -34,6 +29,8 @@ if torch.cuda.is_available():
 mps = getattr(torch.backends, 'mps', None)
 if mps and mps.is_available() and mps.is_built():
     device = 'mps'
+    _orig = torch.Tensor.__repr__
+    torch.Tensor.__repr__ = lambda t: _orig(t.cpu()) # the whl is slightly buggy...
 
 def sample_seeds(N, base=None):
     if base is None:
@@ -76,10 +73,10 @@ class ModelViz(ToolbarViewer):
     
     @lru_cache()
     def _get_model(self, name):
-        conf = globals()[f'{name}_autoenc_latent']()
+        conf = getattr(templates_latent, f'{name}_autoenc_latent')()
         conf.seed = None
         conf.pretrain = None
-        conf.fp16 = (device != 'mps')
+        conf.fp16 = (device == 'cuda')
 
         assert conf.train_mode == TrainMode.latent_diffusion
         assert conf.model_type.has_autoenc()
@@ -115,7 +112,7 @@ class ModelViz(ToolbarViewer):
 
     # Progress bar below images
     def draw_output_extra(self):
-        self.rend.i = imgui.slider_int('', self.rend.i, 0, self.rend.last_ui_state.T)[1]
+        self.rend.i = imgui.slider_int('', self.rend.i + 1, 1, self.rend.last_ui_state.T)[1] - 1
 
     def compute(self):
         # Copy for this frame
@@ -133,7 +130,7 @@ class ModelViz(ToolbarViewer):
             self.rend.intermed = sample_normal((s.B, 3, res, res), s.seed).to(device) # spaial noise
 
         # Check if work is done
-        if self.rend.i >= s.T:
+        if self.rend.i >= s.T - 1:
             return None
 
         conf = self.rend.model.conf
@@ -169,7 +166,7 @@ class ModelViz(ToolbarViewer):
         # Run diffusion one step forward
         model_kwargs = {'x_start': None, 'cond': cond}
         
-        t = th.tensor([s.T - self.rend.i - 1] * s.B, device=device, requires_grad=False)
+        t = torch.tensor([s.T - self.rend.i - 1] * s.B, device=device, requires_grad=False) # 0-based index, num_steps -> 0
         ret = self.rend.sampl.ddim_sample(
             ema_model,
             self.rend.intermed,
@@ -192,16 +189,16 @@ class ModelViz(ToolbarViewer):
             if key in self.rend.img_cache:
                 self.rend.intermed[i] = torch.tensor(self.rend.img_cache[key], device=device)
                 finished[i] = True
-            elif self.rend.i >= s.T:
-                self.rend.img_cache[key] = img.cpu().numpy()
+            elif self.rend.i >= s.T - 1:
+                if not torch.any(torch.isnan(img)): # MPS bug: sometimes contains NaNs that darken image
+                    self.rend.img_cache[key] = img.cpu().numpy()
 
         # Early exit
         if all(finished):
-            self.rend.i = s.T
+            self.rend.i = s.T - 1
         
         # Output updated grid
         grid = reshape_grid(0.5 * (self.rend.intermed + 1)) # => HWC
-        #Image.fromarray(np.uint8(255*grid.cpu().numpy())).show()
         return grid if device == 'cuda' else grid.cpu().numpy()
     
     def draw_toolbar(self):
