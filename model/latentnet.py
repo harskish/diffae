@@ -185,7 +185,7 @@ class MLPLNAct(nn.Module):
             if cond[1] is not None:
                 x = x + cond[1]
             # then norm
-            x = self.norm(x)
+            x = self.norm(x.to(self.norm.weight.dtype))
         else:
             # no condition
             x = self.norm(x)

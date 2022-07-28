@@ -14,10 +14,10 @@ from os import makedirs
 from pathlib import Path
 import gdown
 
-import templates_latent
 from templates import LitModel
 from config import TrainMode
 from diffusion import SpacedDiffusionBeatGans
+from bench import CONFIGS
 
 args = None
 model_opts = ['bedroom128', 'horse128', 'ffhq256']
@@ -70,25 +70,15 @@ class ModelViz(ToolbarViewer):
         self.check_dataclass(self.rend)
         self.state.pkl = args.model
         self.G_lock = Lock()
+
+        self.state.backend = device
     
     @lru_cache()
-    def _get_model(self, name):
-        conf = getattr(templates_latent, f'{name}_autoenc_latent')()
-        conf.seed = None
-        conf.pretrain = None
-        conf.fp16 = (device == 'cuda')
-
-        assert conf.train_mode == TrainMode.latent_diffusion
-        assert conf.model_type.has_autoenc()
-
-        model = LitModel(conf)
-        state = torch.load(f'checkpoints/{conf.name}/last.ckpt', map_location='cpu')
-        model.load_state_dict(state['state_dict'], strict=False)
-        
-        return model
+    def _get_model(self, name, backend):
+        return CONFIGS[backend](name)
 
     def init_model(self, name):
-        model = self._get_model(name).to(device)
+        model = self._get_model(name, self.state.backend)
 
         # Reset caches
         prev = self.rend.model
@@ -127,7 +117,8 @@ class ModelViz(ToolbarViewer):
             self.update_samplers(s)
             self.rend.i = 0
             res = self.rend.model.conf.img_size
-            self.rend.intermed = sample_normal((s.B, 3, res, res), s.seed).to(device) # spaial noise
+            dev = self.rend.model.ema_model.input_blocks[0][0].weight.device
+            self.rend.intermed = sample_normal((s.B, 3, res, res), s.seed).to(dev) # spaial noise
 
         # Check if work is done
         if self.rend.i >= s.T - 1:
@@ -135,23 +126,25 @@ class ModelViz(ToolbarViewer):
 
         conf = self.rend.model.conf
         ema_model = self.rend.model.ema_model
+        dev_lat = ema_model.latent_net.layers[0].linear.weight.device
+        dev_img = ema_model.input_blocks[0][0].weight.device
 
         cond = None
         if s.show_ds:
             # Use dataset image latents
-            cond = self.rend.model.conds[s.seed:s.seed+s.B].to(device) # not normalized
+            cond = self.rend.model.conds[s.seed:s.seed+s.B].to(dev_img) # not normalized
         else:
             # Sample latents
             keys = [(s.seed + i, s.lat_T) for i in range(s.B)]
             missing = [k[0] for k in keys if k not in self.rend.lat_cache]
             if missing:
-                latent_noise = seeds_to_samples(missing, (len(missing), conf.style_ch)).to(device)
+                latent_noise = seeds_to_samples(missing, (len(missing), conf.style_ch)).to(dev_lat)
                 lats = self.rend.lat_sampl.sample(
                     model=ema_model.latent_net,
                     noise=latent_noise,
                     clip_denoised=conf.latent_clip_sample,
                     progress=False,
-                )
+                ).to(dev_img)
 
                 # Avoid double normalization
                 if conf.latent_znormalize:
@@ -161,12 +154,12 @@ class ModelViz(ToolbarViewer):
                 for seed, lat in zip(missing, lats):
                     self.rend.lat_cache[(seed, s.lat_T)] = lat
             
-            cond = torch.stack([self.rend.lat_cache[k] for k in keys], dim=0)
+            cond = torch.stack([self.rend.lat_cache[k].to(dev_img) for k in keys], dim=0)
 
         # Run diffusion one step forward
         model_kwargs = {'x_start': None, 'cond': cond}
         
-        t = torch.tensor([s.T - self.rend.i - 1] * s.B, device=device, requires_grad=False) # 0-based index, num_steps -> 0
+        t = torch.tensor([s.T - self.rend.i - 1] * s.B, device=dev_img, requires_grad=False) # 0-based index, num_steps -> 0
         ret = self.rend.sampl.ddim_sample(
             ema_model,
             self.rend.intermed,
@@ -209,6 +202,7 @@ class ModelViz(ToolbarViewer):
         s.T = imgui.input_int('T_img', s.T, 1, 10)[1]
         s.lat_T = imgui.input_int('T_lat', s.lat_T, 1, 10)[1]
         s.pkl = combo_box_vals('Model', model_opts, s.pkl)[1]
+        s.backend = combo_box_vals('Backend', list(CONFIGS.keys()), s.backend)[1]
 
 # Volatile state: requires recomputation of results
 @dataclass
@@ -219,6 +213,7 @@ class UIState:
     seed: int = 0
     B: int = 1
     show_ds: bool = False
+    backend: str = None
 
 @dataclass
 class RendererState:
