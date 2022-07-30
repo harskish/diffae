@@ -306,7 +306,7 @@ class GaussianDiffusionBeatGans:
 
         B, C = x.shape[:2]
         assert t.shape == (B, )
-        with autocast(x.device.type, enabled=self.conf.fp16):
+        with autocast(x.device.type if self.conf.fp16 else 'cpu', enabled=self.conf.fp16):
             model_forward = model.forward(x=x, t=self._scale_timesteps(t), **model_kwargs)
             model_output = model_forward.pred
 

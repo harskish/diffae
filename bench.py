@@ -182,9 +182,23 @@ CONFIGS = {
 
 if __name__ == '__main__':
     dset = 'ffhq256'
-    show(run(CONFIGS['cpu'](dset)))        # Lat:  46.85it/s, img: 0.46it/s, tot: 0.46it/s
-    show(run(CONFIGS['cpu_traced'](dset))) # Lat: 170.92it/s, img: 0.47it/s, tot: 0.47it/s
-    show(run(CONFIGS['mps'](dset)))        # Lat:  20.82it/s, img: 2.99it/s, tot: 2.61it/s
-    show(run(CONFIGS['mps_traced'](dset))) # Lat:  34.98it/s, img: 3.01it/s, tot: 2.77it/s
-    show(run(CONFIGS['m2_opt'](dset)))     # Lat:  62.44it/s, img: 2.98it/s, tot: 2.84it/s
+    show(run(CONFIGS['cpu'](dset)))
+    show(run(CONFIGS['cpu_traced'](dset)))
+    show(run(CONFIGS['mps'](dset)))
+    show(run(CONFIGS['mps_traced'](dset)))
+    show(run(CONFIGS['m2_opt'](dset)))
     print('Done')
+
+    # M2 MacBook Air 13" (4E+4P+10GPU)
+    # cpu         Lat:  46.85it/s, img: 0.46it/s, tot: 0.46it/s
+    # cpu_traced  Lat: 170.92it/s, img: 0.47it/s, tot: 0.47it/s
+    # mps         Lat:  20.82it/s, img: 2.99it/s, tot: 2.61it/s
+    # mps_traced  Lat:  34.98it/s, img: 3.01it/s, tot: 2.77it/s
+    # m2_opt      Lat:  62.44it/s, img: 2.98it/s, tot: 2.84it/s
+
+    # M1 Pro MacBook Pro 14" (2E+6P+14GPU)
+    # cpu         Lat:  86.85it/s, img: 0.54it/s, tot: 0.54it/s
+    # cpu_traced  Lat: 120.78it/s, img: 0.53it/s, tot: 0.53it/s
+    # mps         Lat:  29.44it/s, img: 4.05it/s, tot: 3.56it/s
+    # mps_traced  Lat:  40.38it/s, img: 4.19it/s, tot: 3.80it/s
+    # m2_opt      Lat:  92.37it/s, img: 4.26it/s, tot: 4.07it/s (1.43x)
