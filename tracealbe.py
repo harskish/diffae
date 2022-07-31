@@ -4,6 +4,7 @@ from typing import Callable
 from templates import LitModel
 import templates_latent
 from config import TrainMode
+import functools
 
 # Traceable sampler
 class _DDIMSamplerTorch(torch.nn.Module):
@@ -21,13 +22,25 @@ class _DDIMSamplerTorch(torch.nn.Module):
         self.is_lat = is_lat
 
     # Sample for T iterations
-    def sample(self, T: torch.Tensor, x0: torch.Tensor, eval_model: Callable):
+    @torch.jit.script_if_tracing
+    def sample(self, T: torch.Tensor, x0: torch.Tensor, eval_model):
         params = self.forward(T)
 
         x = x0
-        n_iter = torch.ones(1).repeat(T).size(0)
+        n_iter = T.item() #torch.ones(1).repeat(T).size(0)
         for t in torch.arange(0, n_iter, device=x0.device).flip(0).view(-1, 1):
-            x = self.sample_incr(t, x, eval_model, **params)
+            x = self.sample_incr(
+                t,
+                x,
+                eval_model,
+                params['timestep_map'],
+                params['posterior_variance'],
+                params['alphas_cumprod'],
+                params['alphas_cumprod_prev'],
+                params['sqrt_recip_alphas_cumprod'],
+                params['sqrt_recipm1_alphas_cumprod'],
+                params['betas'],
+            )
 
         return x
 
@@ -36,7 +49,7 @@ class _DDIMSamplerTorch(torch.nn.Module):
         self,
         t,
         x,
-        eval_model: Callable,
+        eval_model,
         timestep_map,
         posterior_variance,
         alphas_cumprod,
@@ -181,12 +194,13 @@ class DiffAEModel(torch.nn.Module):
 
     @torch.jit.export
     def sample_lat(self, T_lat: torch.Tensor, x0_lat: torch.Tensor):
-        lats = self.lat_sampl.sample(T_lat, x0_lat, lambda x, t: self.lat_net(x, t))
+        lats = self.lat_sampl.sample(T_lat, x0_lat, self.lat_net)
         return self.lat_denorm(lats)
     
     @torch.jit.export
     def sample_img(self, T_img: torch.Tensor, x0_img: torch.Tensor, lats: torch.Tensor):
-        return self.img_sampl.sample(T_img, x0_img, lambda x, t: self.img_net(x, t, cond=lats))
+        net_eval = functools.partial(self.img_net.forward, cond=lats)
+        return self.img_sampl.sample(T_img, x0_img, net_eval)
 
     # Get params used in incremental image sampling
     @torch.jit.export
@@ -209,7 +223,8 @@ class DiffAEModel(torch.nn.Module):
         sqrt_recipm1_alphas_cumprod,
         betas
     ):
-        eval_model = lambda x, t: self.img_net(x, t, cond=lats)
+        #eval_model = lambda x, t: self.img_net(x, t, cond=lats)
+        eval_model = functools.partial(self.img_net.forward, cond=lats)
         return self.img_sampl.sample_incr(
             t, x, eval_model, timestep_map, posterior_variance, alphas_cumprod,
             alphas_cumprod_prev, sqrt_recip_alphas_cumprod, sqrt_recipm1_alphas_cumprod, betas)

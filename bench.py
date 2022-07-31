@@ -116,31 +116,54 @@ def model_torch_traced(dev, dset, B=1):
         torch.jit.enable_onednn_fusion(True)
 
     x = torch.randn((B, 512)).to(dev)
-    t = torch.tensor([9] * 1, device=dev) # unscaled
+    t = torch.tensor([9] * B, device=dev) # unscaled
+
+    # torch.jit.trace(lambda) => TraceFunction
+    # torch.jit.trace(module.fun) => trace doesn't support compiling individual module's functions
+    # torch.jit.trace_module(module, {'forward': (i1, i2)}) => Compiled functions can't take variable number of arguments or use keyword-only arguments with defaults
+    # torch.jit.trace(module) = torch.jit.trace(module.forward)?
+    # torch.jit.trace_module(module) => TraceModule?
+
+    # TODO: 'Iterating over a tensor might cause the trace to be incorrect.'
+
+    def test_fun(t, x):
+        #return model.get_img_sampl_params(t)['posterior_variance']
+        #params = model.lat_sampl.forward(t)
+        #return model.lat_sampl.sample_incr(t-1, x, model.lat_net, **params)
+        return model.lat_sampl.sample(t, x, model.lat_net)
+        #params = model.lat_sampl.forward(t)
+        # interm = x
+        # n_iter = t.item() #torch.ones(1).repeat(t).size(0)
+        # for t in torch.arange(0, n_iter, device=x.device).flip(0).view(-1, 1):
+        #     #interm = model.lat_sampl.sample_incr(t, interm, model.lat_net, **params)
+        #     interm = interm + torch.randn_like(interm)*t
+        # return interm
+
+    #jitted = torch.jit.script(test_fun)
+    jitted = torch.jit.trace(test_fun, (t, x))
+    print(jitted(torch.tensor([5] * B, device=dev), x))
+    print(jitted(torch.tensor([10] * B, device=dev), x))
 
     # Latent net
-    #fwd_fun = lambda x, t: model.ema_model.latent_net(x, t).pred
-    #out_ref = fwd_fun(x, t)
-    T_lat = t
-    T_img = t
     x0_lat = torch.randn(B, 512).to(dev)
-    x0_img = torch.randn(B, 3, model.conf.img_size, model.conf.img_size).to(dev)
-    jit_lat = torch.jit.trace(model, (T_lat, T_img, x0_lat, x0_img), check_trace=False)
+    fwd_fun = lambda t, x : model.sample_lat(t, x)
+    jit_lat = torch.jit.trace(fwd_fun, (t, x0_lat), check_trace=False)
+    #jit_lat = torch.jit.trace_module(model, {'sample_lat': (t, x0_lat)}, check_trace=False)
     jit_lat.save(f'{dset}_lat.pt')
-    assert torch.allclose(out_ref.cpu(), jit_lat(x, t).cpu()), 'Lat-net outputs differ'
+    assert torch.allclose(out_ref.cpu(), jit_lat(t, x).cpu()), 'Lat-net outputs differ'
     
     # Export ONNX
     torch.onnx.export(jit_lat,                      # model being run
-                      (x, t),                       # model input (or a tuple for multiple inputs)
+                      (t, x),                       # model input (or a tuple for multiple inputs)
                       f'{dset}_lat.onnx',           # where to save the model (can be a file or file-like object)
-                      input_names = ['z', 't'],     # the model's input names
+                      input_names = ['t', 'z'],     # the model's input names
                       output_names = ['output'],    # the model's output names
                       example_outputs = out_ref)
     
     # Replace with jitted
-    def new_fwd_lat(x, t, **kwargs):
-        return templates_latent.LatentNetReturn(jit_lat(x, t))
-    model.ema_model.latent_net.forward = new_fwd_lat
+    def new_fwd_lat(t, x, **kwargs):
+        return jit_lat(t, x)
+    model.lat_net.forward = new_fwd_lat
 
     # Image diffusion
     cond = torch.randn((B, 512), device=dev)
@@ -179,10 +202,6 @@ def get_model_m2_optimal(dset):
 
     return model
 
-# Still missing: script + trace
-# Also: *tracing* can produce ScriptModule (which can be optimized!)
-# TODO
-
 from functools import partial
 CONFIGS = {
     'cuda': partial(model_torch, 'cuda'),
@@ -197,9 +216,9 @@ CONFIGS = {
 if __name__ == '__main__':
     dset = 'ffhq256'
     
-    show(run(CONFIGS['cuda'](dset)))
+    #show(run(CONFIGS['cuda'](dset)))
     #show(run(CONFIGS['cuda_traced'](dset)))
-    show(run(CONFIGS['cpu'](dset)))
+    #show(run(CONFIGS['cpu'](dset)))
     show(run(CONFIGS['cpu_traced'](dset)))
     show(run(CONFIGS['mps'](dset)))
     show(run(CONFIGS['mps_traced'](dset)))
