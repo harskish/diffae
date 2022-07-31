@@ -24,11 +24,11 @@ autocast = lambda dev, enabled : nullcontext
 if hasattr(th, 'amp'):
     # torch.amp supports multiple device types
     from torch.amp import autocast as _autocast # type: ignore
-    autocast = lambda dev, enabled: _autocast(dev if enabled else 'cpu', enabled)
+    autocast = lambda dev, enabled: _autocast(dev if enabled else 'cpu', enabled=enabled)
 elif hasattr(th.cuda, 'amp'):
     # Sometimes available just for CUDA
     from torch.cuda.amp import autocast as _autocast
-    autocast = lambda _, enabled : _autocast(enabled)
+    autocast = lambda _, enabled : _autocast(enabled=enabled)
 
 import torch.nn.functional as F
 

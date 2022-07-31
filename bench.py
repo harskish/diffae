@@ -417,9 +417,9 @@ CONFIGS = {
 if __name__ == '__main__':
     dset = 'ffhq256'
     
-    model = CONFIGS['cuda'](dset)
-    for i in range(5):
-        show(run(model, seed=i))
+    # model = CONFIGS['cuda'](dset)
+    # for i in range(5):
+    #     show(run(model, seed=i))
     
     show(run(CONFIGS['cpu'](dset)))
     show(run(CONFIGS['cpu_traced'](dset)))
