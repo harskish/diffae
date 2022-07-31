@@ -381,7 +381,6 @@ class GaussianDiffusionBeatGans:
             self.sqrt_recip_alphas_cumprod, t, scaled_xstart.shape)
 
     def _predict_eps_from_xstart(self, x_t, t, pred_xstart):
-        # MPS: 0/0, xt!=0, pred_xstart=0
         return (_extract_into_tensor(self.sqrt_recip_alphas_cumprod, t,
                                      x_t.shape) * x_t -
                 pred_xstart) / _extract_into_tensor(
@@ -617,9 +616,6 @@ class GaussianDiffusionBeatGans:
 
         # Usually our model outputs epsilon, but we re-derive it
         # in case we used x_start or x_prev prediction.
-        
-        # MPS: x is NOT zero...
-        assert out["pred_xstart"].abs().sum() != 0, 'All zeros...'
         eps = self._predict_eps_from_xstart(x, t, out["pred_xstart"])
 
         alpha_bar = _extract_into_tensor(self.alphas_cumprod, t, x.shape)

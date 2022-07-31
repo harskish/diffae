@@ -344,6 +344,9 @@ class BeatGANsUNetModel(nn.Module):
         pred = self.out(h)
         return Return(pred=pred)
 
+    @property
+    def device(self):
+        return next(self.parameters()).device
 
 class Return(NamedTuple):
     pred: th.Tensor

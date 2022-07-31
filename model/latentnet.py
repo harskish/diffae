@@ -119,6 +119,9 @@ class MLPSkipNet(nn.Module):
         h = self.last_act(h)
         return LatentNetReturn(h)
 
+    @property
+    def device(self):
+        return next(self.parameters()).device
 
 class MLPLNAct(nn.Module):
     def __init__(
