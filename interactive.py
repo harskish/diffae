@@ -14,11 +14,8 @@ from os import makedirs
 from pathlib import Path
 import gdown
 
-from diffusion.base import _extract_into_tensor
-from templates import LitModel
-from config import TrainMode
-from diffusion import SpacedDiffusionBeatGans
 from bench import CONFIGS
+from tracealbe import DiffAEModel
 
 args = None
 model_opts = ['bedroom128', 'horse128', 'ffhq256']
@@ -78,28 +75,16 @@ class ModelViz(ToolbarViewer):
     def _get_model(self, name, backend):
         return CONFIGS[backend](name)
 
-    def init_model(self, name):
+    def init_model(self, name) -> DiffAEModel:
         model = self._get_model(name, self.state.backend)
 
         # Reset caches
         prev = self.rend.model
-        if not prev or model.conf.name != prev.conf.name:
+        if not prev or model.name != prev.name:
             self.rend.lat_cache = {}
             self.rend.img_cache = {}
 
         return model
-
-    # Relax even spacing constraint
-    def update_samplers(self, s):
-        T = self.rend.model.conf.T
-
-        conf_img = self.rend.model.conf._make_diffusion_conf(T)
-        conf_img.use_timesteps = np.linspace(0, T, max(2, s.T) + 1, dtype=np.int32).tolist()[:-1]
-        self.rend.sampl = conf_img.make_sampler()
-
-        conf_lat = self.rend.model.conf._make_latent_diffusion_conf(T)
-        conf_lat.use_timesteps = np.linspace(0, T, max(2, s.lat_T) + 1, dtype=np.int32).tolist()[:-1]
-        self.rend.lat_sampl = conf_lat.make_sampler()
 
     # Progress bar below images
     def draw_output_extra(self):
@@ -115,25 +100,22 @@ class ModelViz(ToolbarViewer):
         if self.rend.last_ui_state != s:
             self.rend.last_ui_state = s
             self.rend.model = self.init_model(s.pkl)
-            self.update_samplers(s)
             self.rend.i = 0
-            res = self.rend.model.conf.img_size
-            dev = self.rend.model.ema_model.input_blocks[0][0].weight.device
+            res = self.rend.model.res
+            dev = self.rend.model.dev_img
             self.rend.intermed = sample_normal((s.B, 3, res, res), s.seed).to(dev) # spaial noise
+            self.rend.img_samp_params = self.rend.model.get_img_sampl_params(torch.tensor([s.T]))
 
         # Check if work is done
         if self.rend.i >= s.T - 1:
             return None
 
-        conf = self.rend.model.conf
-        ema_model = self.rend.model.ema_model
-        dev_lat = ema_model.latent_net.layers[0].linear.weight.device
-        dev_img = ema_model.input_blocks[0][0].weight.device
-
+        model = self.rend.model
         cond = None
         if s.show_ds:
             # Use dataset image latents
-            cond = self.rend.model.conds[s.seed:s.seed+s.B].to(dev_img) # not normalized
+            #cond = self.rend.model.conds[s.seed:s.seed+s.B].to(dev_img) # not normalized
+            raise NotImplementedError()
         else:
             ################
             # Sample latents
@@ -141,37 +123,18 @@ class ModelViz(ToolbarViewer):
             keys = [(s.seed + i, s.lat_T) for i in range(s.B)]
             missing = [k[0] for k in keys if k not in self.rend.lat_cache]
             if missing:
-                latent_noise = seeds_to_samples(missing, (len(missing), conf.style_ch)).to(dev_lat)
-                lats = self.rend.lat_sampl.sample(
-                    model=ema_model.latent_net,
-                    noise=latent_noise,
-                    clip_denoised=conf.latent_clip_sample,
-                    progress=False,
-                ).to(dev_img)
-
-                # Avoid double normalization
-                if conf.latent_znormalize:
-                    lats = self.rend.model.denormalize(lats)
+                latent_noise = seeds_to_samples(missing, (len(missing), 512)).to(model.dev_lat)
+                lats = model.sample_lat(torch.tensor([s.lat_T]), latent_noise)
                 
                 # Update cache
                 for seed, lat in zip(missing, lats):
                     self.rend.lat_cache[(seed, s.lat_T)] = lat
             
-            cond = torch.stack([self.rend.lat_cache[k].to(dev_img) for k in keys], dim=0)
+            cond = torch.stack([self.rend.lat_cache[k].to(model.dev_img) for k in keys], dim=0)
 
         # Run diffusion one step forward
-        t = torch.tensor([s.T - self.rend.i - 1] * s.B, device=dev_img) # 0-based index, num_steps -> 0
-        ret = self.rend.sampl.ddim_sample(
-            ema_model,
-            self.rend.intermed,
-            t,
-            clip_denoised=True,
-            denoised_fn=None,
-            cond_fn=None,
-            model_kwargs={'x_start': None, 'cond': cond},
-            eta=0.0,
-        )
-        self.rend.intermed = ret['sample']
+        t = torch.tensor([s.T - self.rend.i - 1] * s.B, device=model.dev_img) # 0-based index, num_steps -> 0
+        self.rend.intermed = model.sample_img_incr(t, self.rend.intermed, cond, **self.rend.img_samp_params)
         
         # Move on to next iteration
         self.rend.i += 1
@@ -219,9 +182,8 @@ class UIState:
 @dataclass
 class RendererState:
     last_ui_state: UIState = None # Detect changes in UI, restart rendering
-    model: LitModel = None
-    sampl: SpacedDiffusionBeatGans = None
-    lat_sampl: SpacedDiffusionBeatGans = None
+    model: DiffAEModel = None
+    img_samp_params: Dict[str, torch.Tensor] = None
     intermed: torch.Tensor = None
     img_cache: Dict[Tuple[bool, int, int, int], torch.Tensor] = None
     lat_cache: Dict[Tuple[int, int], torch.Tensor] = None

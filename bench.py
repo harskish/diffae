@@ -7,14 +7,14 @@ import torch
 import numpy as np
 from numpy.random import RandomState
 from model.unet_autoenc import AutoencReturn
-from templates import LitModel
 import templates_latent
-from config import TrainMode
 from PIL import Image
 from tqdm import trange
+import random
 import time
 import re
 
+from tracealbe import DiffAEModel
 torch.autograd.set_grad_enabled(False)
 
 # Repr monkey patch
@@ -62,161 +62,34 @@ def get_samplers(conf, t_img=10, t_lat=10):
 
     return (sampl, lat_sampl)
 
-# Traceable sampler
-class DDIMSamplerTorch(torch.nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.make_conf()
-        self.T_orig = self.conf.T # constant
-    
-    def make_conf(self):
-        conf = templates_latent.ffhq256_autoenc_latent() #getattr(templates_latent, f'{dset}_autoenc_latent')()
-        conf.seed = None
-        conf.pretrain = None
-        conf.fp16 = False
-
-        assert conf.train_mode == TrainMode.latent_diffusion
-        assert conf.model_type.has_autoenc()
-        self.conf = conf
-
-    # Get params given number of inference steps T
-    def forward(self, T: torch.Tensor):
-        # Compute alphas, betas based on T_orig
-        conf = self.conf._make_diffusion_conf(self.T_orig)
-        alphas = 1.0 - torch.tensor(conf.betas, dtype=torch.float64)
-        alphas_cumprod = torch.cumprod(alphas, dim=0)
-
-        # Adapt to current number of steps T (from SpacedDiffusionBeatGans)
-        const_zero = torch.tensor([0.0], dtype=torch.float64)
-        const_one = torch.tensor([1.0], dtype=torch.float64)
-        timestep_map = torch.linspace(0, self.T_orig, torch.ones(1).repeat(T).size(0) + 1, dtype=torch.int64)[:-1]
-        alphas_cumprod = alphas_cumprod[timestep_map]
-        padded = torch.cat((const_one, alphas_cumprod), dim=0)
-        betas = 1 - padded[1:] / padded[:-1]
-        
-        # Then compute alphas etc. (GaussianDiffusionBeatGans)
-        alphas = 1.0 - betas
-        alphas_cumprod = torch.cumprod(alphas, dim=0)
-        alphas_cumprod_prev = torch.cat((const_one, alphas_cumprod[:-1]))
-        alphas_cumprod_next = torch.cat((alphas_cumprod[1:], const_zero))
-
-        # calculations for diffusion q(x_t | x_{t-1}) and others
-        sqrt_alphas_cumprod = torch.sqrt(alphas_cumprod)
-        sqrt_one_minus_alphas_cumprod = torch.sqrt(1.0 - alphas_cumprod)
-        log_one_minus_alphas_cumprod = torch.log(1.0 - alphas_cumprod)
-        sqrt_recip_alphas_cumprod = torch.sqrt(1.0 / alphas_cumprod)
-        sqrt_recipm1_alphas_cumprod = torch.sqrt(1.0 / alphas_cumprod - 1)
-
-        # calculations for posterior q(x_{t-1} | x_t, x_0)
-        posterior_variance = (betas * (1.0 - alphas_cumprod_prev) / (1.0 - alphas_cumprod))
-        # log calculation clipped because the posterior variance is 0 at the
-        # beginning of the diffusion chain.
-        posterior_log_variance_clipped = torch.log(
-            torch.cat((posterior_variance[1].view(-1), posterior_variance[1:])))
-        posterior_mean_coef1 = (betas * torch.sqrt(alphas_cumprod_prev) / (1.0 - alphas_cumprod))
-        posterior_mean_coef2 = ((1.0 - alphas_cumprod_prev) * torch.sqrt(alphas) / (1.0 - alphas_cumprod))
-
-        # Save to self
-        self.timestep_map = timestep_map
-        self.posterior_variance = posterior_variance
-        self.alphas_cumprod = alphas_cumprod
-        self.alphas_cumprod_prev = alphas_cumprod_prev
-        self.sqrt_recip_alphas_cumprod = sqrt_recip_alphas_cumprod
-        self.sqrt_recipm1_alphas_cumprod = sqrt_recipm1_alphas_cumprod
-        self.betas = betas
-
-        return None
-
-
-def run(model, steps=10, B=1, verbose=True, seed=None):
-    seed = np.random.randint(0, 1<<32-1) if seed is None else seed
+def run(model: DiffAEModel, steps=10, B=1, verbose=True, seed=None):
+    random.seed(time.time())
+    seed = random.randint(0, 1<<32-1) if seed is None else seed
     steps_lat = 10
-    sampl, lat_sampl = get_samplers(model.conf, steps, steps_lat)
-    ema_model = model.ema_model
-    conf = model.conf
     ran_fun = trange if verbose else range
-    dev_lat = model.ema_model.latent_net.layers[0].linear.weight.device
-    dev_img = model.ema_model.input_blocks[0][0].weight.device
+    dev_lat = model.dev_lat
+    dev_img = model.dev_img
     
     # Warmup
-    _x1 = torch.randn((B, 512))
-    _x2 = torch.randn((B, 3, model.conf.img_size, model.conf.img_size))
+    _x1 = torch.randn((B, 512)).to(dev_lat)
+    _x2 = torch.randn((B, 3, model.res, model.res)).to(dev_img)
     _t = torch.tensor([9] * B)
     for _ in range(3):
-        _ = model.ema_model.latent_net(_x1.to(dev_lat), _t.to(dev_lat))
-        _ = model.ema_model(_x2.to(dev_img), _t.to(dev_img), cond=_x1.to(dev_img))
+        _ = model.forward(_t.to(dev_lat), _t.to(dev_img), _x1, _x2)
 
     t0 = time.time()
     latent_noise = torch.tensor(RandomState(seed).randn(B, 512), dtype=torch.float32).to(dev_lat)
-    
-    # diffusion.base.GaussianDiffusionBeatGANs::ddim_sample()
-    #   GaussianDiffusionBeatGANs::p_mean_variance()
-    #     model.forward(x=x, t=t)
-    lats = lat_sampl.sample(
-        model=ema_model.latent_net,
-        noise=latent_noise,
-        clip_denoised=conf.latent_clip_sample,
-        progress=False,
-    ).to(dev_img)
+    T = torch.tensor([steps_lat], dtype=torch.int32)
+    lats = model.sample_lat(T, latent_noise)
     t1 = time.time()
-
-    # Avoid double normalization
-    if conf.latent_znormalize:
-        lats = model.denormalize(lats)
     
     # Initial value: spaial noise
-    intermed = torch.tensor(RandomState(seed).randn(B, 3, conf.img_size, conf.img_size), dtype=torch.float32).to(dev_img)
-
-    # TODO: custom Torch sampler
-    sampl = DDIMSamplerTorch()
-    sampl(torch.tensor([steps], dtype=torch.int32))
+    intermed = torch.tensor(RandomState(seed).randn(B, 3, model.res, model.res), dtype=torch.float32).to(dev_img)
+    params = model.get_img_sampl_params(torch.tensor([steps], dtype=torch.int32))
 
     for i in ran_fun(steps):
-        t = torch.tensor([steps - i - 1] * B, device=dev_img, requires_grad=False)
-
-        #ret = sampl(torch.tensor([steps], dtype=torch.int32))
-        
-        def _predict_eps_from_xstart(x_t, t, pred_xstart):
-            num = _extract_into_tensor(sampl.sqrt_recip_alphas_cumprod, t, x_t.shape) * x_t - pred_xstart
-            denom = _extract_into_tensor(sampl.sqrt_recipm1_alphas_cumprod, t, x_t.shape)
-            return num / denom
-
-        def _predict_xstart_from_eps(x_t, t, eps):
-            assert x_t.shape == eps.shape
-            a1 = _extract_into_tensor(sampl.sqrt_recip_alphas_cumprod, t, x_t.shape)
-            a2 = _extract_into_tensor(sampl.sqrt_recipm1_alphas_cumprod, t, x_t.shape)
-            return (a1 * x_t - a2 * eps)
-
-        def _extract_into_tensor(arr, timesteps, broadcast_shape):
-            res = arr.float().to(device=timesteps.device)[timesteps]
-            while len(res.shape) < len(broadcast_shape):
-                res = res[..., None]
-            return res.expand(broadcast_shape)
-
-        x = intermed
-        eta = 0.0
-        
-        #################################
-        # Run model with scaled timestamp
-        #################################
-        map_tensor = sampl.timestep_map.to(t.device)
-        model_forward = ema_model.forward(x=x, t=map_tensor[t], x_start=None, cond=lats)
-        model_output = model_forward.pred
-
-        model_variance = torch.cat((sampl.posterior_variance[1].view(-1), sampl.betas[1:]))
-        model_log_variance = torch.log(torch.cat((sampl.posterior_variance[1].view(-1), sampl.betas[1:])))
-        model_variance = _extract_into_tensor(model_variance, t, x.shape)
-        model_log_variance = _extract_into_tensor(model_log_variance, t, x.shape)
-        pred_xstart = _predict_xstart_from_eps(x_t=x, t=t, eps=model_output).clamp(-1, 1)
-        
-        eps = _predict_eps_from_xstart(x, t, pred_xstart)
-        alpha_bar = _extract_into_tensor(sampl.alphas_cumprod, t, x.shape)
-        alpha_bar_prev = _extract_into_tensor(sampl.alphas_cumprod_prev, t, x.shape)
-        sigma = (eta * torch.sqrt((1 - alpha_bar_prev) / (1 - alpha_bar)) * torch.sqrt(1 - alpha_bar / alpha_bar_prev))
-        
-        # Equation 12.
-        mean_pred = (pred_xstart * torch.sqrt(alpha_bar_prev) + torch.sqrt(1 - alpha_bar_prev - sigma**2) * eps)
-        intermed = mean_pred
+        t = torch.tensor([steps - i - 1] * B, device=dev_img)
+        intermed = model.sample_img_incr(t, intermed, lats, **params)
 
     t2 = time.time()
     
@@ -231,20 +104,8 @@ def run(model, steps=10, B=1, verbose=True, seed=None):
     return intermed
 
 def model_torch(dev, dset):
-    conf = getattr(templates_latent, f'{dset}_autoenc_latent')()
-    conf.seed = None
-    conf.pretrain = None
-    conf.fp16 = False
-
-    assert conf.train_mode == TrainMode.latent_diffusion
-    assert conf.model_type.has_autoenc()
-
-    model = LitModel(conf)
-    assert isinstance(model, torch.nn.Module), 'Not a torch module!'
-    state = torch.load(f'checkpoints/{conf.name}/last.ckpt', map_location='cpu')
-    model.load_state_dict(state['state_dict'], strict=False)
+    model = DiffAEModel(dset)
     setattr(model, 'traced', False)
-    
     return model.to(dev)
 
 # https://ppwwyyxx.com/blog/2022/TorchScript-Tracing-vs-Scripting/
@@ -255,12 +116,16 @@ def model_torch_traced(dev, dset, B=1):
         torch.jit.enable_onednn_fusion(True)
 
     x = torch.randn((B, 512)).to(dev)
-    t = torch.tensor([9] * 1, device=dev, requires_grad=False) # unscaled
+    t = torch.tensor([9] * 1, device=dev) # unscaled
 
     # Latent net
-    fwd_fun = lambda x, t: model.ema_model.latent_net(x, t).pred
-    out_ref = fwd_fun(x, t)
-    jit_lat = torch.jit.trace(fwd_fun, (x, t), check_trace=False)
+    #fwd_fun = lambda x, t: model.ema_model.latent_net(x, t).pred
+    #out_ref = fwd_fun(x, t)
+    T_lat = t
+    T_img = t
+    x0_lat = torch.randn(B, 512).to(dev)
+    x0_img = torch.randn(B, 3, model.conf.img_size, model.conf.img_size).to(dev)
+    jit_lat = torch.jit.trace(model, (T_lat, T_img, x0_lat, x0_img), check_trace=False)
     jit_lat.save(f'{dset}_lat.pt')
     assert torch.allclose(out_ref.cpu(), jit_lat(x, t).cpu()), 'Lat-net outputs differ'
     
@@ -269,7 +134,8 @@ def model_torch_traced(dev, dset, B=1):
                       (x, t),                       # model input (or a tuple for multiple inputs)
                       f'{dset}_lat.onnx',           # where to save the model (can be a file or file-like object)
                       input_names = ['z', 't'],     # the model's input names
-                      output_names = ['output'])    # the model's output names
+                      output_names = ['output'],    # the model's output names
+                      example_outputs = out_ref)
     
     # Replace with jitted
     def new_fwd_lat(x, t, **kwargs):
@@ -289,12 +155,14 @@ def model_torch_traced(dev, dset, B=1):
                       (x, t, cond),                     # model input (or a tuple for multiple inputs)
                       f'{dset}_img.onnx',               # where to save the model (can be a file or file-like object)
                       input_names = ['z', 't', 'cond'], # the model's input names
-                      output_names = ['output'])        # the model's output names
+                      output_names = ['output'],        # the model's output names
+                      example_outputs = out_ref,
+                      opset_version=12)                 # einsum
 
     # Replace with jitted
     def new_fwd_img(x, t, cond=None, **kwargs):
         assert not any(kwargs.values()), 'Unsupported kwargs provided'
-        ret = jit_img(x, t, cond=cond)
+        ret = jit_img(x, t, cond)
         return AutoencReturn(pred=ret, cond=cond)
     model.ema_model.forward = new_fwd_img
 
@@ -310,94 +178,6 @@ def get_model_m2_optimal(dset):
     model.ema_model.latent_net = model_torch_traced('cpu', dset).ema_model.latent_net
 
     return model
-
-import torch.nn as nn
-
-class DiffAE(nn.Module):
-    def __init__(self, steps=10, steps_lat=None, traced=False):
-        super().__init__()
-        model_constr = model_torch_traced if traced else model_torch
-        model = model_constr('mps', 'ffhq256')
-        self.model = model.ema_model
-        self.lat_model = self.model.latent_net
-        self.conf = model.conf
-        self.sampl = self.lat_sampl = None
-        self.init_lat_sampler(steps_lat or steps)
-        self.init_img_sampler(steps)
-        self.register_buffer('conds_std', model.conds_std)
-        self.register_buffer('conds_mean', model.conds_mean)
-
-    @property
-    def device(self):
-        return next(self.parameters()).device
-
-    def init_img_sampler(self, steps=10):
-        conf_img = self.conf._make_diffusion_conf(self.conf.T)
-        conf_img.use_timesteps = np.linspace(0, self.conf.T, max(2, steps) + 1, dtype=np.int32).tolist()[:-1]
-        self.sampl = conf_img.make_sampler()
-
-    def init_lat_sampler(self, steps=10):
-        conf_lat = self.conf._make_latent_diffusion_conf(self.conf.T)
-        conf_lat.use_timesteps = np.linspace(0, self.conf.T, max(2, steps) + 1, dtype=np.int32).tolist()[:-1]
-        self.lat_sampl = conf_lat.make_sampler()
-
-    def denorm_z(self, cond):
-        cond = (cond * self.conds_std.to(cond.device)) + self.conds_mean.to(cond.device)
-        return cond
-
-    def run_lat_model(self, z, steps=10):
-        self.init_lat_sampler(steps)
-        lats = self.lat_sampl.sample(
-            model=self.lat_model,
-            noise=z,
-            clip_denoised=self.conf.latent_clip_sample,
-            progress=False
-        )
-
-        return lats
-    
-    def forward(self, z, steps, steps_lat=None, B=1):
-        # Get conditioning ('latent vector')
-        cond = self.run_lat_model(z, steps_lat or steps)
-        
-        # Avoid double normalization
-        if self.conf.latent_znormalize:
-            cond = self.denorm_z(cond)
-        
-        # Initial value: spaial noise
-        intermed = torch.randn((B, 3, self.conf.img_size, self.conf.img_size)).to(self.model.device)
-        model_kwargs = {'x_start': None, 'cond': cond}
-        self.init_img_sampler(steps)
-        
-        sched = torch.arange(steps, device=self.model.device).flip(0).view(-1, 1)
-        for t in sched:
-            ret = self.sampl.ddim_sample(
-                self.model,
-                intermed,
-                t,
-                clip_denoised=True,
-                denoised_fn=None,
-                cond_fn=None,
-                model_kwargs=model_kwargs,
-                eta=0.0,
-            )
-            intermed = ret['sample']
-        
-        return intermed
-
-# Partial trace
-#z = torch.randn(1, 512).to('mps')
-#test = DiffAE(traced=True)
-#img = test.forward(z, 10, 10)
-#show(img)
-
-# FULL TRACE
-# z = torch.randn(1, 512).to('mps')
-# model = DiffAE(traced=False)
-# tl = ti = 10
-# full_trace = torch.jit.trace(lambda z: model(z, ti, tl), (z), check_trace=False) # step counts fixed
-# full_trace.save(f'ffhq256_{ti}i_{tl}l_full.pt')
-# show(full_trace(z))
 
 # Still missing: script + trace
 # Also: *tracing* can produce ScriptModule (which can be optimized!)
@@ -417,10 +197,8 @@ CONFIGS = {
 if __name__ == '__main__':
     dset = 'ffhq256'
     
-    # model = CONFIGS['cuda'](dset)
-    # for i in range(5):
-    #     show(run(model, seed=i))
-    
+    show(run(CONFIGS['cuda'](dset)))
+    #show(run(CONFIGS['cuda_traced'](dset)))
     show(run(CONFIGS['cpu'](dset)))
     show(run(CONFIGS['cpu_traced'](dset)))
     show(run(CONFIGS['mps'](dset)))
