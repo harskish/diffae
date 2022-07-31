@@ -114,8 +114,7 @@ class ModelViz(ToolbarViewer):
         cond = None
         if s.show_ds:
             # Use dataset image latents
-            #cond = self.rend.model.conds[s.seed:s.seed+s.B].to(dev_img) # not normalized
-            raise NotImplementedError()
+            cond = self.rend.model.dset_lats[s.seed:s.seed+s.B].to(model.dev_img) # not normalized
         else:
             ################
             # Sample latents

@@ -92,7 +92,7 @@ class _DDIMSamplerTorch(torch.nn.Module):
         const_zero = torch.tensor([0.0], dtype=dtype)
         const_one = torch.tensor([1.0], dtype=dtype)
 
-        timestep_map = torch.linspace(0, self.T_orig, torch.ones(1).repeat(T).size(0) + 1, dtype=torch.int64)[:-1]
+        timestep_map = torch.linspace(0, self.T_orig, torch.ones(1).repeat(T.clip(2, None)).size(0) + 1, dtype=torch.int64)[:-1]
         alphas_cumprod = self.alphas_cumprod[timestep_map]
         padded = torch.cat((const_one, alphas_cumprod), dim=0)
         betas = 1 - padded[1:] / padded[:-1]
@@ -149,6 +149,7 @@ class DiffAEModel(torch.nn.Module):
         assert isinstance(model, torch.nn.Module), 'Not a torch module!'
         state = torch.load(f'checkpoints/{conf.name}/last.ckpt', map_location='cpu')
         model.load_state_dict(state['state_dict'], strict=False)
+        self.dset_lats = model.conds
 
         self.res = conf.img_size
         self.lat_sampl = DDIMSamplerLat(conf)
