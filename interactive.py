@@ -160,45 +160,18 @@ class ModelViz(ToolbarViewer):
             cond = torch.stack([self.rend.lat_cache[k].to(dev_img) for k in keys], dim=0)
 
         # Run diffusion one step forward
-        model_kwargs = {'x_start': None, 'cond': cond}
-        
-        t = torch.tensor([s.T - self.rend.i - 1] * s.B, device=dev_img, requires_grad=False) # 0-based index, num_steps -> 0
-
-        def _predict_eps_from_xstart(x_t, t, pred_xstart):
-            return (_extract_into_tensor(self.rend.sampl.sqrt_recip_alphas_cumprod, t,
-                                        x_t.shape) * x_t -
-                    pred_xstart) / _extract_into_tensor(
-                        self.rend.sampl.sqrt_recipm1_alphas_cumprod, t, x_t.shape)
-
-        x = self.rend.intermed
-        eta = 0.0
-        
-        #################################
-        # Run model with scaled timestamp
-        #################################
-        map_tensor = torch.tensor(self.rend.sampl.timestep_map, device=t.device, dtype=t.dtype)
-        model_forward = ema_model.forward(x=x, t=map_tensor[t], **model_kwargs)
-        model_output = model_forward.pred
-
-        model_variance = np.append(self.rend.sampl.posterior_variance[1], self.rend.sampl.betas[1:])
-        model_log_variance = np.log(np.append(self.rend.sampl.posterior_variance[1], self.rend.sampl.betas[1:]))
-        model_variance = _extract_into_tensor(model_variance, t, x.shape)
-        model_log_variance = _extract_into_tensor(model_log_variance, t, x.shape)
-
-        pred_xstart = self.rend.sampl._predict_xstart_from_eps(x_t=x, t=t, eps=model_output).clamp(-1, 1)
-
-        #===============================
-        
-        eps = _predict_eps_from_xstart(x, t, pred_xstart)
-        alpha_bar = _extract_into_tensor(self.rend.sampl.alphas_cumprod, t, x.shape)
-        alpha_bar_prev = _extract_into_tensor(self.rend.sampl.alphas_cumprod_prev, t, x.shape)
-        sigma = (eta * torch.sqrt((1 - alpha_bar_prev) / (1 - alpha_bar)) * torch.sqrt(1 - alpha_bar / alpha_bar_prev))
-        # Equation 12.
-        mean_pred = (pred_xstart * torch.sqrt(alpha_bar_prev) +
-                     torch.sqrt(1 - alpha_bar_prev - sigma**2) * eps)
-        sample = mean_pred
-
-        self.rend.intermed = sample
+        t = torch.tensor([s.T - self.rend.i - 1] * s.B, device=dev_img) # 0-based index, num_steps -> 0
+        ret = self.rend.sampl.ddim_sample(
+            ema_model,
+            self.rend.intermed,
+            t,
+            clip_denoised=True,
+            denoised_fn=None,
+            cond_fn=None,
+            model_kwargs={'x_start': None, 'cond': cond},
+            eta=0.0,
+        )
+        self.rend.intermed = ret['sample']
         
         # Move on to next iteration
         self.rend.i += 1
@@ -220,7 +193,7 @@ class ModelViz(ToolbarViewer):
         
         # Output updated grid
         grid = reshape_grid(0.5 * (self.rend.intermed + 1)) # => HWC
-        return grid if device == 'cuda' else grid.cpu().numpy()
+        return grid if grid.device.type == 'cuda' else grid.cpu().numpy()
     
     def draw_toolbar(self):
         s = self.state

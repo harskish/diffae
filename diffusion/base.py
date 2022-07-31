@@ -10,7 +10,7 @@ from sqlite3 import Timestamp
 from statistics import mode
 from model.unet_autoenc import AutoencReturn
 from config_base import BaseConfig
-import enum
+from contextlib import nullcontext # py3.7+
 import math
 
 import numpy as np
@@ -19,7 +19,17 @@ from model import *
 from model.nn import mean_flat
 from typing import NamedTuple, Tuple
 from choices import *
-from torch.amp import autocast
+
+autocast = lambda dev, enabled : nullcontext
+if hasattr(th, 'amp'):
+    # torch.amp supports multiple device types
+    from torch.amp import autocast as _autocast # type: ignore
+    autocast = lambda dev, enabled: _autocast(dev if enabled else 'cpu', enabled)
+elif hasattr(th.cuda, 'amp'):
+    # Sometimes available just for CUDA
+    from torch.cuda.amp import autocast as _autocast
+    autocast = lambda _, enabled : _autocast(enabled)
+
 import torch.nn.functional as F
 
 from dataclasses import dataclass
@@ -306,7 +316,7 @@ class GaussianDiffusionBeatGans:
 
         B, C = x.shape[:2]
         assert t.shape == (B, )
-        with autocast(x.device.type if self.conf.fp16 else 'cpu', enabled=self.conf.fp16):
+        with autocast(x.device.type, enabled=self.conf.fp16):
             model_forward = model.forward(x=x, t=self._scale_timesteps(t), **model_kwargs)
             model_output = model_forward.pred
 

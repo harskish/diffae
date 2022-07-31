@@ -4,11 +4,13 @@
 # - Onnxruntime (CoreML, w/ NE?) - only C++?
 
 from getopt import getopt
+from random import Random
 import torch
 import numpy as np
 from numpy.random import RandomState
 from model.unet_autoenc import AutoencReturn
 from templates import LitModel
+from diffusion.base import _extract_into_tensor
 import templates_latent
 from config import TrainMode
 from PIL import Image
@@ -63,7 +65,8 @@ def get_samplers(conf, t_img=10, t_lat=10):
 
     return (sampl, lat_sampl)
 
-def run(model, steps=10, B=1, verbose=True):
+def run(model, steps=10, B=1, verbose=True, seed=None):
+    seed = seed or np.random.randint(0, 1<<32-1)
     steps_lat = 10
     sampl, lat_sampl = get_samplers(model.conf, steps, steps_lat)
     ema_model = model.ema_model
@@ -81,8 +84,7 @@ def run(model, steps=10, B=1, verbose=True):
         _ = model.ema_model(_x2.to(dev_img), _t.to(dev_img), cond=_x1.to(dev_img))
 
     t0 = time.time()
-    latent_noise = torch.randn((B, 512)).to(dev_lat)
-    
+    latent_noise = torch.tensor(RandomState(seed).randn(B, 512), dtype=torch.float32).to(dev_lat)
     
     # diffusion.base.GaussianDiffusionBeatGANs::ddim_sample()
     #   GaussianDiffusionBeatGANs::p_mean_variance()
@@ -98,26 +100,42 @@ def run(model, steps=10, B=1, verbose=True):
     # Avoid double normalization
     if conf.latent_znormalize:
         lats = model.denormalize(lats)
-
-    # Run diffusion one step forward
-    model_kwargs = {'x_start': None, 'cond': lats}
     
     # Initial value: spaial noise
-    intermed = torch.randn((B, 3, conf.img_size, conf.img_size)).to(dev_img)
+    intermed = torch.tensor(RandomState(seed).randn(B, 3, conf.img_size, conf.img_size), dtype=torch.float32).to(dev_img)
 
     for i in ran_fun(steps):
         t = torch.tensor([steps - i - 1] * B, device=dev_img, requires_grad=False)
-        ret = sampl.ddim_sample(
-            ema_model,
-            intermed,
-            t,
-            clip_denoised=True,
-            denoised_fn=None,
-            cond_fn=None,
-            model_kwargs=model_kwargs,
-            eta=0.0,
-        )
-        intermed = ret['sample']
+        
+        def _predict_eps_from_xstart(x_t, t, pred_xstart):
+            num = _extract_into_tensor(sampl.sqrt_recip_alphas_cumprod, t, x_t.shape) * x_t - pred_xstart
+            denom = _extract_into_tensor(sampl.sqrt_recipm1_alphas_cumprod, t, x_t.shape)
+            return num / denom
+
+        x = intermed
+        eta = 0.0
+        
+        #################################
+        # Run model with scaled timestamp
+        #################################
+        map_tensor = torch.tensor(sampl.timestep_map, device=t.device, dtype=t.dtype)
+        model_forward = ema_model.forward(x=x, t=map_tensor[t], x_start=None, cond=lats)
+        model_output = model_forward.pred
+
+        model_variance = np.append(sampl.posterior_variance[1], sampl.betas[1:])
+        model_log_variance = np.log(np.append(sampl.posterior_variance[1], sampl.betas[1:]))
+        model_variance = _extract_into_tensor(model_variance, t, x.shape)
+        model_log_variance = _extract_into_tensor(model_log_variance, t, x.shape)
+        pred_xstart = sampl._predict_xstart_from_eps(x_t=x, t=t, eps=model_output).clamp(-1, 1)
+        
+        eps = _predict_eps_from_xstart(x, t, pred_xstart)
+        alpha_bar = _extract_into_tensor(sampl.alphas_cumprod, t, x.shape)
+        alpha_bar_prev = _extract_into_tensor(sampl.alphas_cumprod_prev, t, x.shape)
+        sigma = (eta * torch.sqrt((1 - alpha_bar_prev) / (1 - alpha_bar)) * torch.sqrt(1 - alpha_bar / alpha_bar_prev))
+        
+        # Equation 12.
+        mean_pred = (pred_xstart * torch.sqrt(alpha_bar_prev) + torch.sqrt(1 - alpha_bar_prev - sigma**2) * eps)
+        intermed = mean_pred
 
     t2 = time.time()
     
@@ -317,6 +335,7 @@ CONFIGS = {
 
 if __name__ == '__main__':
     dset = 'ffhq256'
+    show(run(CONFIGS['cuda'](dset)))
     show(run(CONFIGS['cpu'](dset)))
     show(run(CONFIGS['cpu_traced'](dset)))
     show(run(CONFIGS['mps'](dset)))
