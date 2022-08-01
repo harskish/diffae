@@ -118,8 +118,7 @@ def model_torch_traced(dev, dset, B=1, export=False) -> DiffAEModel:
     if is_set('USE_MKLDNN') and is_set('BUILD_ONEDNN_GRAPH'):
         torch.jit.enable_onednn_fusion(True)
 
-    x = torch.randn((B, 512)).to(dev)
-    T = torch.tensor([10] * B, device=dev) # unscaled
+    T = torch.tensor([10] * B, device=dev)
     t = T - 1
 
     # torch.jit.trace(lambda) => TraceFunction
@@ -143,22 +142,20 @@ def model_torch_traced(dev, dset, B=1, export=False) -> DiffAEModel:
             input_names = ['T'],          # the model's input names
             output_names = [              # the model's output names
                 'timestep_map',
-                'posterior_variance',
                 'alphas_cumprod',
                 'alphas_cumprod_prev',
                 'sqrt_recip_alphas_cumprod',
                 'sqrt_recipm1_alphas_cumprod',
-                'betas',
             ]
         )
 
     # Replace with jitted
     model.lat_sampl.forward = jit_lat_init
 
-    # Latent net
-    def fwd_fun(t, x, v1, v2, v3, v4, v5, v6, v7):
+    # # Latent net
+    def fwd_fun(t, x, *vs):
         eval_fn = lambda x, t: model.lat_net.forward(x, t)
-        return model.lat_sampl.sample_incr(t, x, eval_fn, v1, v2, v3, v4, v5, v6, v7)
+        return model.lat_sampl.sample_incr(t, x, eval_fn, *vs)
     x0 = torch.randn(B, 512).to(dev)
     example_vs = model.lat_sampl.forward(T)
     jit_lat = torch.jit.trace(fwd_fun, (t, x0, *example_vs), check_trace=False)
@@ -172,14 +169,13 @@ def model_torch_traced(dev, dset, B=1, export=False) -> DiffAEModel:
                 't',
                 'x',
                 'timestep_map',
-                'posterior_variance',
                 'alphas_cumprod',
                 'alphas_cumprod_prev',
                 'sqrt_recip_alphas_cumprod',
                 'sqrt_recipm1_alphas_cumprod',
-                'betas',
             ],
-            output_names = ['lats']
+            output_names = ['lats'],
+            do_constant_folding=False
         )
     
     # Replace with jitted
@@ -199,12 +195,10 @@ def model_torch_traced(dev, dset, B=1, export=False) -> DiffAEModel:
             input_names = ['T'],          # the model's input names
             output_names = [              # the model's output names
                 'timestep_map',
-                'posterior_variance',
                 'alphas_cumprod',
                 'alphas_cumprod_prev',
                 'sqrt_recip_alphas_cumprod',
                 'sqrt_recipm1_alphas_cumprod',
-                'betas',
             ]
         )
 
@@ -212,13 +206,13 @@ def model_torch_traced(dev, dset, B=1, export=False) -> DiffAEModel:
     model.img_sampl.forward = jit_img_init
 
     # Image net
-    def fwd_fun(t, x, lats, v1, v2, v3, v4, v5, v6, v7):
+    def fwd_fun(t, x, lats, *vs):
         eval_fn = lambda x, t: model.img_net.forward(x, t, cond=lats)
-        return model.img_sampl.sample_incr(t, x, eval_fn, v1, v2, v3, v4, v5, v6, v7)
+        return model.img_sampl.sample_incr(t, x, eval_fn, *vs)
     x0 = torch.randn(B, 3, model.res, model.res).to(dev)
     lats = torch.randn(B, 512).to(dev)
     example_vs = model.img_sampl.forward(T)
-    jit_img = torch.jit.trace(fwd_fun, (t, x0, lats, *example_vs), check_trace=False)
+    jit_img = torch.jit.trace(fwd_fun, (t, x0, lats, *example_vs), check_trace=True)
     if export:
         jit_img.save(f'{dset}_img.pt')
         torch.onnx.export(
@@ -230,14 +224,17 @@ def model_torch_traced(dev, dset, B=1, export=False) -> DiffAEModel:
                 'x',
                 'lats',
                 'timestep_map',
-                'posterior_variance',
                 'alphas_cumprod',
                 'alphas_cumprod_prev',
                 'sqrt_recip_alphas_cumprod',
                 'sqrt_recipm1_alphas_cumprod',
-                'betas',
             ],
-            output_names = ['output']
+            output_names = ['output'],
+            do_constant_folding=False,
+            keep_initializers_as_inputs=False,
+            export_modules_as_functions=False,
+            verbose=False,
+            operator_export_type=torch.onnx.OperatorExportTypes.ONNX, # ONNX_ATEN, ONNX_ATEN_FALLBACK
         )
 
     # Replace with jitted

@@ -52,12 +52,10 @@ class _DDIMSamplerTorch(torch.nn.Module):
         x,
         eval_model: Callable,
         timestep_map,
-        posterior_variance,
         alphas_cumprod,
         alphas_cumprod_prev,
         sqrt_recip_alphas_cumprod,
         sqrt_recipm1_alphas_cumprod,
-        betas,
     ):
         eta = 0.0
 
@@ -82,10 +80,6 @@ class _DDIMSamplerTorch(torch.nn.Module):
         model_forward = eval_model(x, map_tensor[t])
         model_output = model_forward.pred
 
-        model_variance = torch.cat((posterior_variance[1].view(-1), betas[1:]))
-        model_log_variance = torch.log(torch.cat((posterior_variance[1].view(-1), betas[1:])))
-        model_variance = _extract_into_tensor(model_variance, t, x.shape)
-        model_log_variance = _extract_into_tensor(model_log_variance, t, x.shape)
         pred_xstart = _predict_xstart_from_eps(x_t=x, t=t, eps=model_output)
         if not self.is_lat:
             pred_xstart = pred_xstart.clamp(-1, 1)
@@ -103,7 +97,6 @@ class _DDIMSamplerTorch(torch.nn.Module):
     # Get params given number of inference steps T
     def forward(self, T: torch.Tensor):
         dtype = self.alphas_cumprod.dtype
-        const_zero = torch.tensor([0.0], dtype=dtype)
         const_one = torch.tensor([1.0], dtype=dtype)
 
         timestep_map = torch.linspace(0, self.T_orig, torch.ones(1).repeat(T.clip(2, None)).size(0) + 1, dtype=torch.int64)[:-1]
@@ -115,33 +108,16 @@ class _DDIMSamplerTorch(torch.nn.Module):
         alphas = 1.0 - betas
         alphas_cumprod = onnx_compatible_cumprod(alphas, dim=0) # ONNX has no cumprod...
         alphas_cumprod_prev = torch.cat((const_one, alphas_cumprod[:-1]))
-        alphas_cumprod_next = torch.cat((alphas_cumprod[1:], const_zero))
-
-        # calculations for diffusion q(x_t | x_{t-1}) and others
-        sqrt_alphas_cumprod = torch.sqrt(alphas_cumprod)
-        sqrt_one_minus_alphas_cumprod = torch.sqrt(1.0 - alphas_cumprod)
-        log_one_minus_alphas_cumprod = torch.log(1.0 - alphas_cumprod)
         sqrt_recip_alphas_cumprod = torch.sqrt(1.0 / alphas_cumprod)
         sqrt_recipm1_alphas_cumprod = torch.sqrt(1.0 / alphas_cumprod - 1)
-
-        # calculations for posterior q(x_{t-1} | x_t, x_0)
-        posterior_variance = (betas * (1.0 - alphas_cumprod_prev) / (1.0 - alphas_cumprod))
-        # log calculation clipped because the posterior variance is 0 at the
-        # beginning of the diffusion chain.
-        posterior_log_variance_clipped = torch.log(
-            torch.cat((posterior_variance[1].view(-1), posterior_variance[1:])))
-        posterior_mean_coef1 = (betas * torch.sqrt(alphas_cumprod_prev) / (1.0 - alphas_cumprod))
-        posterior_mean_coef2 = ((1.0 - alphas_cumprod_prev) * torch.sqrt(alphas) / (1.0 - alphas_cumprod))
 
         # jit.trace requires a constant container (tuple instead of list, NamedTuple instead of dict)
         return (
             timestep_map,
-            posterior_variance,
             alphas_cumprod,
             alphas_cumprod_prev,
             sqrt_recip_alphas_cumprod,
             sqrt_recipm1_alphas_cumprod,
-            betas,
         )
 
 class DDIMSamplerLat(_DDIMSamplerTorch):
@@ -158,6 +134,7 @@ class DiffAEModel(torch.nn.Module):
         conf = getattr(templates_latent, f'{dset}_autoenc_latent')()
         conf.pretrain = None
         conf.fp16 = False
+        conf.seed = None # will be set globally if not None
         self.name = conf.name
 
         model = LitModel(conf)
@@ -218,14 +195,12 @@ class DiffAEModel(torch.nn.Module):
         lats,
         # Below params from self.get_img_sampl_params()
         timestep_map,
-        posterior_variance,
         alphas_cumprod,
         alphas_cumprod_prev,
         sqrt_recip_alphas_cumprod,
         sqrt_recipm1_alphas_cumprod,
-        betas
     ):
         eval_model = partial(self.img_net, cond=lats)
         return self.img_sampl.sample_incr(
-            t, x, eval_model, timestep_map, posterior_variance, alphas_cumprod,
-            alphas_cumprod_prev, sqrt_recip_alphas_cumprod, sqrt_recipm1_alphas_cumprod, betas)
+            t, x, eval_model, timestep_map, alphas_cumprod,
+            alphas_cumprod_prev, sqrt_recip_alphas_cumprod, sqrt_recipm1_alphas_cumprod)
