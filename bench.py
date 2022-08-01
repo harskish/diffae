@@ -142,13 +142,13 @@ def model_torch_traced(dev, dset, B=1, export=False) -> DiffAEModel:
             f'{dset}_lat_init.onnx',      # where to save the model (can be a file or file-like object)
             input_names = ['T'],          # the model's input names
             output_names = [              # the model's output names
-                'timestep_map'
-                'posterior_variance'
-                'alphas_cumprod'
-                'alphas_cumprod_prev'
-                'sqrt_recip_alphas_cumprod'
-                'sqrt_recipm1_alphas_cumprod'
-                'betas'
+                'timestep_map',
+                'posterior_variance',
+                'alphas_cumprod',
+                'alphas_cumprod_prev',
+                'sqrt_recip_alphas_cumprod',
+                'sqrt_recipm1_alphas_cumprod',
+                'betas',
             ]
         )
 
@@ -170,14 +170,14 @@ def model_torch_traced(dev, dset, B=1, export=False) -> DiffAEModel:
             f'{dset}_lat.onnx',       # where to save the model (can be a file or file-like object)
             input_names = [           # the model's input names
                 't',
-                'x0',
-                'timestep_map'
-                'posterior_variance'
-                'alphas_cumprod'
-                'alphas_cumprod_prev'
-                'sqrt_recip_alphas_cumprod'
-                'sqrt_recipm1_alphas_cumprod'
-                'betas'
+                'x',
+                'timestep_map',
+                'posterior_variance',
+                'alphas_cumprod',
+                'alphas_cumprod_prev',
+                'sqrt_recip_alphas_cumprod',
+                'sqrt_recipm1_alphas_cumprod',
+                'betas',
             ],
             output_names = ['lats']
         )
@@ -198,13 +198,13 @@ def model_torch_traced(dev, dset, B=1, export=False) -> DiffAEModel:
             f'{dset}_img_init.onnx',      # where to save the model (can be a file or file-like object)
             input_names = ['T'],          # the model's input names
             output_names = [              # the model's output names
-                'timestep_map'
-                'posterior_variance'
-                'alphas_cumprod'
-                'alphas_cumprod_prev'
-                'sqrt_recip_alphas_cumprod'
-                'sqrt_recipm1_alphas_cumprod'
-                'betas'
+                'timestep_map',
+                'posterior_variance',
+                'alphas_cumprod',
+                'alphas_cumprod_prev',
+                'sqrt_recip_alphas_cumprod',
+                'sqrt_recipm1_alphas_cumprod',
+                'betas',
             ]
         )
 
@@ -227,15 +227,15 @@ def model_torch_traced(dev, dset, B=1, export=False) -> DiffAEModel:
             f'{dset}_img.onnx',          # where to save the model (can be a file or file-like object)
             input_names = [              # the model's input names
                 't',
-                'x0',
+                'x',
                 'lats',
-                'timestep_map'
-                'posterior_variance'
-                'alphas_cumprod'
-                'alphas_cumprod_prev'
-                'sqrt_recip_alphas_cumprod'
-                'sqrt_recipm1_alphas_cumprod'
-                'betas'
+                'timestep_map',
+                'posterior_variance',
+                'alphas_cumprod',
+                'alphas_cumprod_prev',
+                'sqrt_recip_alphas_cumprod',
+                'sqrt_recipm1_alphas_cumprod',
+                'betas',
             ],
             output_names = ['output']
         )
@@ -274,11 +274,11 @@ if __name__ == '__main__':
     
     #show(run(CONFIGS['cuda'](dset)))
     #show(run(CONFIGS['cuda_traced'](dset)))
-    show(run(CONFIGS['m2_opt'](dset)))
-    show(run(CONFIGS['mps_traced'](dset)))
-    show(run(CONFIGS['mps'](dset)))
     show(run(CONFIGS['cpu'](dset)))
     show(run(CONFIGS['cpu_traced'](dset)))
+    show(run(CONFIGS['mps'](dset)))
+    show(run(CONFIGS['mps_traced'](dset)))
+    show(run(CONFIGS['m2_opt'](dset)))
     print('Done')
 
     # M2 MacBook Air 13" (4E+4P+10GPU)
@@ -295,3 +295,19 @@ if __name__ == '__main__':
     # mps_traced  Lat:  40.38it/s, img: 4.19it/s, tot: 3.80it/s
     # m2_opt      Lat:  92.37it/s, img: 4.26it/s, tot: 4.07it/s (1.43x)
     # full_trace                                  tot: 4.24it/s
+
+    # Torch-only rewrite (1.8.2022)
+
+    # M1 Pro MacBook Pro 14" (2E+6P+14GPU) - no debugger
+    # cpu         Lat:  90.62it/s, img: 0.50it/s, tot: 0.50it/s
+    # cpu_traced  Lat: 118.95it/s, img: 0.52it/s, tot: 0.52it/s
+    # mps         Lat:  71.70it/s, img: 4.41it/s, tot: 4.15it/s
+    # mps_traced  Lat: 107.92it/s, img: 4.44it/s, tot: 4.26it/s
+    # m2_opt      Lat:  88.16it/s, img: 4.35it/s, tot: 4.14it/s
+    
+    # M1 Pro MacBook Pro 14" (2E+6P+14GPU) - with debugger
+    # cpu         Lat:  51.82it/s, img: 0.50it/s, tot: 0.49it/s
+    # cpu_traced  Lat: 121.03it/s, img: 0.50it/s, tot: 0.50it/s
+    # mps         Lat:  51.25it/s, img: 4.28it/s, tot: 3.95it/s
+    # mps_traced  Lat: 101.61it/s, img: 4.35it/s, tot: 4.17it/s
+    # m2_opt      Lat:  88.10it/s, img: 4.41it/s, tot: 4.20it/s
