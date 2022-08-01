@@ -73,9 +73,12 @@ def run(model: DiffAEModel, steps=10, B=1, verbose=True, seed=None):
     # Warmup
     _x1 = torch.randn((B, 512)).to(dev_lat)
     _x2 = torch.randn((B, 3, model.res, model.res)).to(dev_img)
-    _t = torch.tensor([9] * B)
+    _t = torch.tensor([3] * B)
+    print('Warmup', end='')
     for _ in range(3):
         _ = model.forward(_t.to(dev_lat), _t.to(dev_img), _x1, _x2)
+        print('.', end='')
+    print('done')
 
     t0 = time.time()
     latent_noise = torch.tensor(RandomState(seed).randn(B, 512), dtype=torch.float32).to(dev_lat)
@@ -89,7 +92,7 @@ def run(model: DiffAEModel, steps=10, B=1, verbose=True, seed=None):
 
     for i in ran_fun(steps):
         t = torch.tensor([steps - i - 1] * B, device=dev_img)
-        intermed = model.sample_img_incr(t, intermed, lats, **params)
+        intermed = model.sample_img_incr(t, intermed, lats, *params)
 
     t2 = time.time()
     
@@ -109,85 +112,138 @@ def model_torch(dev, dset):
     return model.to(dev)
 
 # https://ppwwyyxx.com/blog/2022/TorchScript-Tracing-vs-Scripting/
-def model_torch_traced(dev, dset, B=1):
+def model_torch_traced(dev, dset, B=1, export=False) -> DiffAEModel:
     model = model_torch(dev, dset)
     
     if is_set('USE_MKLDNN') and is_set('BUILD_ONEDNN_GRAPH'):
         torch.jit.enable_onednn_fusion(True)
 
     x = torch.randn((B, 512)).to(dev)
-    t = torch.tensor([9] * B, device=dev) # unscaled
+    T = torch.tensor([10] * B, device=dev) # unscaled
+    t = T - 1
 
     # torch.jit.trace(lambda) => TraceFunction
     # torch.jit.trace(module.fun) => trace doesn't support compiling individual module's functions
     # torch.jit.trace_module(module, {'forward': (i1, i2)}) => Compiled functions can't take variable number of arguments or use keyword-only arguments with defaults
     # torch.jit.trace(module) = torch.jit.trace(module.forward)?
     # torch.jit.trace_module(module) => TraceModule?
+    # 'Iterating over a tensor might cause the trace to be incorrect.'
 
-    # TODO: 'Iterating over a tensor might cause the trace to be incorrect.'
+    # example_outputs no longer exists in torch 1.11+
 
-    def test_fun(t, x):
-        #return model.get_img_sampl_params(t)['posterior_variance']
-        #params = model.lat_sampl.forward(t)
-        #return model.lat_sampl.sample_incr(t-1, x, model.lat_net, **params)
-        return model.lat_sampl.sample(t, x, model.lat_net)
-        #params = model.lat_sampl.forward(t)
-        # interm = x
-        # n_iter = t.item() #torch.ones(1).repeat(t).size(0)
-        # for t in torch.arange(0, n_iter, device=x.device).flip(0).view(-1, 1):
-        #     #interm = model.lat_sampl.sample_incr(t, interm, model.lat_net, **params)
-        #     interm = interm + torch.randn_like(interm)*t
-        # return interm
+    # Latent net init
+    fwd_fun = lambda T : model.lat_sampl.forward(T)
+    jit_lat_init = torch.jit.trace(fwd_fun, (T), check_trace=False)
+    if export:
+        jit_lat_init.save(f'{dset}_lat_init.pt')
+        torch.onnx.export(
+            jit_lat_init,                 # model being run
+            (T),                          # model input (or a tuple for multiple inputs)
+            f'{dset}_lat_init.onnx',      # where to save the model (can be a file or file-like object)
+            input_names = ['T'],          # the model's input names
+            output_names = [              # the model's output names
+                'timestep_map'
+                'posterior_variance'
+                'alphas_cumprod'
+                'alphas_cumprod_prev'
+                'sqrt_recip_alphas_cumprod'
+                'sqrt_recipm1_alphas_cumprod'
+                'betas'
+            ]
+        )
 
-    #jitted = torch.jit.script(test_fun)
-    jitted = torch.jit.trace(test_fun, (t, x))
-    print(jitted(torch.tensor([5] * B, device=dev), x))
-    print(jitted(torch.tensor([10] * B, device=dev), x))
+    # Replace with jitted
+    model.lat_sampl.forward = jit_lat_init
 
     # Latent net
-    x0_lat = torch.randn(B, 512).to(dev)
-    fwd_fun = lambda t, x : model.sample_lat(t, x)
-    jit_lat = torch.jit.trace(fwd_fun, (t, x0_lat), check_trace=False)
-    #jit_lat = torch.jit.trace_module(model, {'sample_lat': (t, x0_lat)}, check_trace=False)
-    jit_lat.save(f'{dset}_lat.pt')
-    assert torch.allclose(out_ref.cpu(), jit_lat(t, x).cpu()), 'Lat-net outputs differ'
-    
-    # Export ONNX
-    torch.onnx.export(jit_lat,                      # model being run
-                      (t, x),                       # model input (or a tuple for multiple inputs)
-                      f'{dset}_lat.onnx',           # where to save the model (can be a file or file-like object)
-                      input_names = ['t', 'z'],     # the model's input names
-                      output_names = ['output'],    # the model's output names
-                      example_outputs = out_ref)
+    def fwd_fun(t, x, v1, v2, v3, v4, v5, v6, v7):
+        eval_fn = lambda x, t: model.lat_net.forward(x, t)
+        return model.lat_sampl.sample_incr(t, x, eval_fn, v1, v2, v3, v4, v5, v6, v7)
+    x0 = torch.randn(B, 512).to(dev)
+    example_vs = model.lat_sampl.forward(T)
+    jit_lat = torch.jit.trace(fwd_fun, (t, x0, *example_vs), check_trace=False)
+    if export:
+        jit_lat.save(f'{dset}_lat.pt')
+        torch.onnx.export(
+            jit_lat,                  # model being run
+            (t, x0, *example_vs),     # model input (or a tuple for multiple inputs)
+            f'{dset}_lat.onnx',       # where to save the model (can be a file or file-like object)
+            input_names = [           # the model's input names
+                't',
+                'x0',
+                'timestep_map'
+                'posterior_variance'
+                'alphas_cumprod'
+                'alphas_cumprod_prev'
+                'sqrt_recip_alphas_cumprod'
+                'sqrt_recipm1_alphas_cumprod'
+                'betas'
+            ],
+            output_names = ['lats']
+        )
     
     # Replace with jitted
-    def new_fwd_lat(t, x, **kwargs):
-        return jit_lat(t, x)
-    model.lat_net.forward = new_fwd_lat
+    def new_fwd_lat(t, x, eval_model, *params):
+        return jit_lat(t, x, *params)
+    model.lat_sampl.sample_incr = new_fwd_lat
 
-    # Image diffusion
-    cond = torch.randn((B, 512), device=dev)
-    x = torch.randn((B, 3, model.conf.img_size, model.conf.img_size)).to(dev)
-    fwd_fun = lambda x, t, cond: model.ema_model(x, t, cond=cond, x_start=None).pred
-    out_ref = fwd_fun(x, t, cond)
-    jit_img = torch.jit.trace(fwd_fun, (x, t, cond), check_trace=False)
-    jit_img.save(f'{dset}_img.pt')
-    #assert torch.allclose(out_ref.cpu(), jit_img(x, t, cond).cpu()), 'Img-net outputs differ'
-
-    torch.onnx.export(jit_img,                          # model being run
-                      (x, t, cond),                     # model input (or a tuple for multiple inputs)
-                      f'{dset}_img.onnx',               # where to save the model (can be a file or file-like object)
-                      input_names = ['z', 't', 'cond'], # the model's input names
-                      output_names = ['output'],        # the model's output names
-                      example_outputs = out_ref,
-                      opset_version=12)                 # einsum
+    # Image net init
+    fwd_fun = lambda T : model.img_sampl.forward(T)
+    jit_img_init = torch.jit.trace(fwd_fun, (T), check_trace=False)
+    if export:
+        jit_img_init.save(f'{dset}_ing_init.pt')
+        torch.onnx.export(
+            jit_img_init,                 # model being run
+            (T),                          # model input (or a tuple for multiple inputs)
+            f'{dset}_img_init.onnx',      # where to save the model (can be a file or file-like object)
+            input_names = ['T'],          # the model's input names
+            output_names = [              # the model's output names
+                'timestep_map'
+                'posterior_variance'
+                'alphas_cumprod'
+                'alphas_cumprod_prev'
+                'sqrt_recip_alphas_cumprod'
+                'sqrt_recipm1_alphas_cumprod'
+                'betas'
+            ]
+        )
 
     # Replace with jitted
-    def new_fwd_img(x, t, cond=None, **kwargs):
-        assert not any(kwargs.values()), 'Unsupported kwargs provided'
-        ret = jit_img(x, t, cond)
-        return AutoencReturn(pred=ret, cond=cond)
-    model.ema_model.forward = new_fwd_img
+    model.img_sampl.forward = jit_img_init
+
+    # Image net
+    def fwd_fun(t, x, lats, v1, v2, v3, v4, v5, v6, v7):
+        eval_fn = lambda x, t: model.img_net.forward(x, t, cond=lats)
+        return model.img_sampl.sample_incr(t, x, eval_fn, v1, v2, v3, v4, v5, v6, v7)
+    x0 = torch.randn(B, 3, model.res, model.res).to(dev)
+    lats = torch.randn(B, 512).to(dev)
+    example_vs = model.img_sampl.forward(T)
+    jit_img = torch.jit.trace(fwd_fun, (t, x0, lats, *example_vs), check_trace=False)
+    if export:
+        jit_img.save(f'{dset}_img.pt')
+        torch.onnx.export(
+            jit_img,                     # model being run
+            (t, x0, lats, *example_vs),  # model input (or a tuple for multiple inputs)
+            f'{dset}_img.onnx',          # where to save the model (can be a file or file-like object)
+            input_names = [              # the model's input names
+                't',
+                'x0',
+                'lats',
+                'timestep_map'
+                'posterior_variance'
+                'alphas_cumprod'
+                'alphas_cumprod_prev'
+                'sqrt_recip_alphas_cumprod'
+                'sqrt_recipm1_alphas_cumprod'
+                'betas'
+            ],
+            output_names = ['output']
+        )
+
+    # Replace with jitted
+    def new_fwd_img(t, x, eval_model, *params):
+        return jit_img(t, x, eval_model.keywords['cond'], *params)
+    model.img_sampl.sample_incr = new_fwd_img
 
     setattr(model, 'traced', True)
     return model
@@ -198,7 +254,7 @@ def get_model_m2_optimal(dset):
     model = model_torch_traced('mps', dset)
     
     # Traced latent net fastest on CPU
-    model.ema_model.latent_net = model_torch_traced('cpu', dset).ema_model.latent_net
+    model.lat_net = model_torch_traced('cpu', dset).lat_net
 
     return model
 
@@ -218,11 +274,11 @@ if __name__ == '__main__':
     
     #show(run(CONFIGS['cuda'](dset)))
     #show(run(CONFIGS['cuda_traced'](dset)))
-    #show(run(CONFIGS['cpu'](dset)))
-    show(run(CONFIGS['cpu_traced'](dset)))
-    show(run(CONFIGS['mps'](dset)))
-    show(run(CONFIGS['mps_traced'](dset)))
     show(run(CONFIGS['m2_opt'](dset)))
+    show(run(CONFIGS['mps_traced'](dset)))
+    show(run(CONFIGS['mps'](dset)))
+    show(run(CONFIGS['cpu'](dset)))
+    show(run(CONFIGS['cpu_traced'](dset)))
     print('Done')
 
     # M2 MacBook Air 13" (4E+4P+10GPU)

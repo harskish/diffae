@@ -1,10 +1,17 @@
-from turtle import forward
 import torch
+import numpy as np
 from typing import Callable
 from templates import LitModel
 import templates_latent
-from config import TrainMode
-import functools
+from functools import partial
+
+# Numerically unstable, but probably OK for small tensors
+def onnx_compatible_cumprod(t: torch.Tensor, dim: int=0):
+    x = t                        # [1, 2]
+    x = torch.log(x)             # [log(1), log(2)]
+    x = torch.cumsum(x, dim=dim) # [log(1), log(1)+log(2)] = [log(1), log(1*2)]
+    x = torch.exp(x)             # [e^log(1), e^log(1*2)] = [1, 1*2]
+    return x
 
 # Traceable sampler
 class _DDIMSamplerTorch(torch.nn.Module):
@@ -16,31 +23,25 @@ class _DDIMSamplerTorch(torch.nn.Module):
             betas = conf._make_latent_diffusion_conf(conf.T).betas
         else:
             betas = conf._make_diffusion_conf(conf.T).betas
-        alphas = 1.0 - torch.tensor(betas, dtype=dtype)
-        self.alphas_cumprod = torch.cumprod(alphas, dim=0) # constant
+        alphas = 1.0 - betas
+        self.alphas_cumprod = torch.tensor(
+            np.cumprod(alphas, axis=0), dtype=dtype) # constant
         self.T_orig = conf.T # constant
         self.is_lat = is_lat
 
-    # Sample for T iterations
-    @torch.jit.script_if_tracing
-    def sample(self, T: torch.Tensor, x0: torch.Tensor, eval_model):
-        params = self.forward(T)
+    # Sample for T iteration
+    # Contains dynamic control flow => untraceable
+    @torch.jit.unused
+    def sample(self, T: torch.Tensor, x0: torch.Tensor, eval_model: Callable):
+        params = self.forward(T) # tuple
 
         x = x0
-        n_iter = T.item() #torch.ones(1).repeat(T).size(0)
+
+        # The below loop over the ternsor will use static iteration count
+        # => cannot trace
+        n_iter = torch.ones(1).repeat(T).size(0)
         for t in torch.arange(0, n_iter, device=x0.device).flip(0).view(-1, 1):
-            x = self.sample_incr(
-                t,
-                x,
-                eval_model,
-                params['timestep_map'],
-                params['posterior_variance'],
-                params['alphas_cumprod'],
-                params['alphas_cumprod_prev'],
-                params['sqrt_recip_alphas_cumprod'],
-                params['sqrt_recipm1_alphas_cumprod'],
-                params['betas'],
-            )
+            x = self.sample_incr(t, x, eval_model, *params)
 
         return x
 
@@ -49,7 +50,7 @@ class _DDIMSamplerTorch(torch.nn.Module):
         self,
         t,
         x,
-        eval_model,
+        eval_model: Callable,
         timestep_map,
         posterior_variance,
         alphas_cumprod,
@@ -112,7 +113,7 @@ class _DDIMSamplerTorch(torch.nn.Module):
         
         # Then compute alphas etc. (GaussianDiffusionBeatGans)
         alphas = 1.0 - betas
-        alphas_cumprod = torch.cumprod(alphas, dim=0)
+        alphas_cumprod = onnx_compatible_cumprod(alphas, dim=0) # ONNX has no cumprod...
         alphas_cumprod_prev = torch.cat((const_one, alphas_cumprod[:-1]))
         alphas_cumprod_next = torch.cat((alphas_cumprod[1:], const_zero))
 
@@ -132,15 +133,16 @@ class _DDIMSamplerTorch(torch.nn.Module):
         posterior_mean_coef1 = (betas * torch.sqrt(alphas_cumprod_prev) / (1.0 - alphas_cumprod))
         posterior_mean_coef2 = ((1.0 - alphas_cumprod_prev) * torch.sqrt(alphas) / (1.0 - alphas_cumprod))
 
-        return {
-            'timestep_map': timestep_map,
-            'posterior_variance': posterior_variance,
-            'alphas_cumprod': alphas_cumprod,
-            'alphas_cumprod_prev': alphas_cumprod_prev,
-            'sqrt_recip_alphas_cumprod': sqrt_recip_alphas_cumprod,
-            'sqrt_recipm1_alphas_cumprod': sqrt_recipm1_alphas_cumprod,
-            'betas': betas,
-        }
+        # jit.trace requires a constant container (tuple instead of list, NamedTuple instead of dict)
+        return (
+            timestep_map,
+            posterior_variance,
+            alphas_cumprod,
+            alphas_cumprod_prev,
+            sqrt_recip_alphas_cumprod,
+            sqrt_recipm1_alphas_cumprod,
+            betas,
+        )
 
 class DDIMSamplerLat(_DDIMSamplerTorch):
     def __init__(self, conf, dtype=torch.float32):
@@ -194,13 +196,13 @@ class DiffAEModel(torch.nn.Module):
 
     @torch.jit.export
     def sample_lat(self, T_lat: torch.Tensor, x0_lat: torch.Tensor):
-        lats = self.lat_sampl.sample(T_lat, x0_lat, self.lat_net)
+        lats = self.lat_sampl.sample(T_lat, x0_lat, lambda x, t: self.lat_net(x, t))
         return self.lat_denorm(lats)
     
     @torch.jit.export
     def sample_img(self, T_img: torch.Tensor, x0_img: torch.Tensor, lats: torch.Tensor):
-        net_eval = functools.partial(self.img_net.forward, cond=lats)
-        return self.img_sampl.sample(T_img, x0_img, net_eval)
+        eval_fn = partial(self.img_net, cond=lats) # make lats accessible in jitted fwd wrapper
+        return self.img_sampl.sample(T_img, x0_img, eval_fn)
 
     # Get params used in incremental image sampling
     @torch.jit.export
@@ -223,8 +225,7 @@ class DiffAEModel(torch.nn.Module):
         sqrt_recipm1_alphas_cumprod,
         betas
     ):
-        #eval_model = lambda x, t: self.img_net(x, t, cond=lats)
-        eval_model = functools.partial(self.img_net.forward, cond=lats)
+        eval_model = partial(self.img_net, cond=lats)
         return self.img_sampl.sample_incr(
             t, x, eval_model, timestep_map, posterior_variance, alphas_cumprod,
             alphas_cumprod_prev, sqrt_recip_alphas_cumprod, sqrt_recipm1_alphas_cumprod, betas)

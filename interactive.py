@@ -133,7 +133,7 @@ class ModelViz(ToolbarViewer):
 
         # Run diffusion one step forward
         t = torch.tensor([s.T - self.rend.i - 1] * s.B, device=model.dev_img) # 0-based index, num_steps -> 0
-        self.rend.intermed = model.sample_img_incr(t, self.rend.intermed, cond, **self.rend.img_samp_params)
+        self.rend.intermed = model.sample_img_incr(t, self.rend.intermed, cond, *self.rend.img_samp_params)
         
         # Move on to next iteration
         self.rend.i += 1
