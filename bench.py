@@ -3,6 +3,7 @@
 # - coremltools (using NE)
 # - Onnxruntime (CoreML, w/ NE?) - only C++?
 
+from types import SimpleNamespace
 import torch
 import numpy as np
 from numpy.random import RandomState
@@ -100,25 +101,31 @@ def run(model: DiffAEModel, steps=10, B=1, verbose=True, seed=None):
     it_img = (t2 - t1) / steps
     it_tot = (t2 - t0) / steps
 
+    # Summary
+    dev_desc = []
+    for d, mod in zip([dev_lat, dev_img], [model.lat_net.mode, model.img_net.mode]):
+        dev_desc.append(f'[{mod}]{d.type.upper()}')
+    summary = f'{"+".join(dev_desc)} - Lat: {1/it_lat:.2f}it/s, img: {1/it_img:.2f}it/s, tot: {1/it_tot:.2f}it/s'
+    
     if verbose:
-        desc = ' [TR]' if model.traced else ''
-        print(f'{dev_img.type}{desc} - Lat: {1/it_lat:.2f}it/s, img: {1/it_img:.2f}it/s, tot: {1/it_tot:.2f}it/s')
+        print(summary)
 
-    return intermed
+    return intermed, summary
 
-def model_torch(dev, dset):
-    model = DiffAEModel(dset)
-    setattr(model, 'traced', False)
-    return model.to(dev)
+def model_torch(dev_lat, dev_img, dset):
+    model = DiffAEModel(dset, dev_lat, dev_img)
+    setattr(model.lat_net, 'mode', 'INT')
+    setattr(model.img_net, 'mode', 'INT')
+    return model
 
 # https://ppwwyyxx.com/blog/2022/TorchScript-Tracing-vs-Scripting/
-def model_torch_traced(dev, dset, B=1, export=False) -> DiffAEModel:
-    model = model_torch(dev, dset)
+def model_torch_traced(dev_lat, dev_img, dset, B=1, export=False) -> DiffAEModel:
+    model = model_torch(dev_lat, dev_img, dset)
     
     if is_set('USE_MKLDNN') and is_set('BUILD_ONEDNN_GRAPH'):
         torch.jit.enable_onednn_fusion(True)
 
-    T = torch.tensor([10] * B, device=dev)
+    T = torch.tensor([10] * B)
     t = T - 1
 
     # torch.jit.trace(lambda) => TraceFunction
@@ -131,6 +138,7 @@ def model_torch_traced(dev, dset, B=1, export=False) -> DiffAEModel:
     # example_outputs no longer exists in torch 1.11+
 
     # Latent net init
+    T = T.to(dev_lat)
     fwd_fun = lambda T : model.lat_sampl.forward(T)
     jit_lat_init = torch.jit.trace(fwd_fun, (T), check_trace=False)
     if export:
@@ -156,7 +164,8 @@ def model_torch_traced(dev, dset, B=1, export=False) -> DiffAEModel:
     def fwd_fun(t, x, *vs):
         eval_fn = lambda x, t: model.lat_net.forward(x, t)
         return model.lat_sampl.sample_incr(t, x, eval_fn, *vs)
-    x0 = torch.randn(B, 512).to(dev)
+    t = t.to(dev_lat)
+    x0 = torch.randn(B, 512).to(dev_lat)
     example_vs = model.lat_sampl.forward(T)
     jit_lat = torch.jit.trace(fwd_fun, (t, x0, *example_vs), check_trace=False)
     if export:
@@ -184,10 +193,11 @@ def model_torch_traced(dev, dset, B=1, export=False) -> DiffAEModel:
     model.lat_sampl.sample_incr = new_fwd_lat
 
     # Image net init
+    T = T.to(dev_img)
     fwd_fun = lambda T : model.img_sampl.forward(T)
     jit_img_init = torch.jit.trace(fwd_fun, (T), check_trace=False)
     if export:
-        jit_img_init.save(f'{dset}_ing_init.pt')
+        jit_img_init.save(f'{dset}_img_init.pt')
         torch.onnx.export(
             jit_img_init,                 # model being run
             (T),                          # model input (or a tuple for multiple inputs)
@@ -209,8 +219,9 @@ def model_torch_traced(dev, dset, B=1, export=False) -> DiffAEModel:
     def fwd_fun(t, x, lats, *vs):
         eval_fn = lambda x, t: model.img_net.forward(x, t, cond=lats)
         return model.img_sampl.sample_incr(t, x, eval_fn, *vs)
-    x0 = torch.randn(B, 3, model.res, model.res).to(dev)
-    lats = torch.randn(B, 512).to(dev)
+    t = t.to(dev_img)
+    x0 = torch.randn(B, 3, model.res, model.res).to(dev_img)
+    lats = torch.randn(B, 512).to(dev_img)
     example_vs = model.img_sampl.forward(T)
     jit_img = torch.jit.trace(fwd_fun, (t, x0, lats, *example_vs), check_trace=True)
     if export:
@@ -242,40 +253,66 @@ def model_torch_traced(dev, dset, B=1, export=False) -> DiffAEModel:
         return jit_img(t, x, eval_model.keywords['cond'], *params)
     model.img_sampl.sample_incr = new_fwd_img
 
-    setattr(model, 'traced', True)
+    setattr(model.lat_net, 'mode', 'JIT')
+    setattr(model.img_net, 'mode', 'JIT')
     return model
 
-# M2 optimal: mix of traced CPU and GPU
-def get_model_m2_optimal(dset):
-    # Image diffusion fastest on traced MPS
-    model = model_torch_traced('mps', dset)
-    
-    # Traced latent net fastest on CPU
-    model.lat_net = model_torch_traced('cpu', dset).lat_net
+def load_pt_model(dev_lat, dev_img, dset):
+    model = DiffAEModel(dset, dev_lat, dev_img)
 
+    model.lat_sampl.forward = torch.jit.load(f'{dset}_lat_init.pt').to(dev_lat)
+    model.img_sampl.forward = torch.jit.load(f'{dset}_img_init.pt').to(dev_img)
+    model.lat_sampl.sample_incr = torch.jit.load(f'{dset}_lat.pt').to(dev_lat)
+    model.img_sampl.sample_incr = torch.jit.load(f'{dset}_img.pt').to(dev_img)
+
+    setattr(model.lat_net, 'mode', 'PTH')
+    setattr(model.img_net, 'mode', 'PTH')
     return model
 
 from functools import partial
 CONFIGS = {
-    'cuda': partial(model_torch, 'cuda'),
-    'cuda_traced': partial(model_torch_traced, 'cuda'),
-    'cpu': partial(model_torch, 'cpu'),
-    'cpu_traced': partial(model_torch_traced, 'cpu'),
-    'mps': partial(model_torch, 'mps'),
-    'mps_traced': partial(model_torch_traced, 'mps'),
-    'm2_opt': get_model_m2_optimal,
+    'cuda': partial(model_torch, 'cuda', 'cuda'),
+    'cuda_traced': partial(model_torch_traced, 'cuda', 'cuda'),
+    'cuda_pt': partial(load_pt_model, 'cuda', 'cuda'),
+    'cpu': partial(model_torch, 'cpu', 'cpu'),
+    'cpu_traced': partial(model_torch_traced, 'cpu', 'cpu'),
+    'cpu_pt': partial(load_pt_model, 'cpu', 'cpu'),
+    'mps': partial(model_torch, 'mps', 'mps'),
+    'mps_traced': partial(model_torch_traced, 'mps', 'mps'),
+    'mps_pt': partial(load_pt_model, 'mps', 'mps'),
+    'm2_opt': partial(model_torch_traced, 'cpu', 'mps'),
 }
 
 if __name__ == '__main__':
     dset = 'ffhq256'
+    mps = getattr(torch.backends, 'mps', None)
     
-    #show(run(CONFIGS['cuda'](dset)))
-    #show(run(CONFIGS['cuda_traced'](dset)))
-    show(run(CONFIGS['cpu'](dset)))
-    show(run(CONFIGS['cpu_traced'](dset)))
-    show(run(CONFIGS['mps'](dset)))
-    show(run(CONFIGS['mps_traced'](dset)))
-    show(run(CONFIGS['m2_opt'](dset)))
+    configs = []
+    if torch.cuda.is_available():
+        configs.append('cuda')
+        configs.append('cuda_traced')
+        configs.append('cuda_pt')
+    
+    if mps and mps.is_available() and mps.is_built():
+        configs.append('mps')
+        configs.append('mps_traced')
+        configs.append('mps_pt')
+        configs.append('m2_opt')
+    
+    configs.append('cpu')
+    configs.append('cpu_traced')
+    configs.append('cpu_pt')
+    
+    summaries = []
+    for cfg in configs:
+        img, summ = run(CONFIGS[cfg](dset))
+        summaries.append(summ)
+        show(img)
+
+    print('Results:')
+    for summ in summaries:
+        print(summ)
+
     print('Done')
 
     # M2 MacBook Air 13" (4E+4P+10GPU)

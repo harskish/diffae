@@ -129,7 +129,7 @@ class DDIMSamplerImg(_DDIMSamplerTorch):
         super().__init__(conf, dtype, is_lat=False)
 
 class DiffAEModel(torch.nn.Module):
-    def __init__(self, dset):
+    def __init__(self, dset, dev_lat='cpu', dev_img='cpu'):
         super().__init__()
         conf = getattr(templates_latent, f'{dset}_autoenc_latent')()
         conf.pretrain = None
@@ -146,8 +146,11 @@ class DiffAEModel(torch.nn.Module):
         self.res = conf.img_size
         self.lat_sampl = DDIMSamplerLat(conf)
         self.img_sampl = DDIMSamplerImg(conf)
-        self.lat_net = model.ema_model.latent_net
-        self.img_net = model.ema_model
+        self.lat_net = model.ema_model.latent_net.to(dev_lat)
+        self.img_net = model.ema_model.to(dev_img)
+        self.dev_lat = torch.device(dev_lat)
+        self.dev_img = torch.device(dev_img)
+
         self.norm_z = conf.latent_znormalize
         if self.norm_z:
             self.conds_std = model.conds_std
@@ -157,14 +160,6 @@ class DiffAEModel(torch.nn.Module):
         if self.norm_z:
             lat = (lat * self.conds_std.to(lat.device)) + self.conds_mean.to(lat.device)
         return lat
-
-    @property
-    def dev_lat(self):
-        return self.lat_net.layers[0].linear.weight.device
-    
-    @property
-    def dev_img(self):
-        return self.img_net.input_blocks[0][0].weight.device
     
     def forward(self, T_lat: torch.Tensor, T_img: torch.Tensor, x0_lat: torch.Tensor, x0_img: torch.Tensor):
         lats = self.sample_lat(T_lat, x0_lat)
