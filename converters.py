@@ -4,6 +4,7 @@ from sympy import comp
 import torch
 import numpy as np
 import onnxruntime as ort # pip install onnxruntime
+import onnx # from src, whl/onnx. Also: conda install protobuf
 from bench import CONFIGS, show
 from tqdm import trange
 
@@ -24,8 +25,8 @@ def compare(ta, tb, rtol=1e-3):
             raise RuntimeError()
 
 # Export
-model: DiffAEModel = CONFIGS['cpu_traced']('ffhq256', export=True)
-#model: DiffAEModel = CONFIGS['cpu']('ffhq256')
+#model: DiffAEModel = CONFIGS['cpu_traced']('ffhq256', export=True)
+model: DiffAEModel = CONFIGS['cpu']('ffhq256')
 lat_init = 'ffhq256_lat_init.onnx'
 lat_step = 'ffhq256_lat.onnx'
 img_init = 'ffhq256_img_init.onnx'
@@ -33,6 +34,11 @@ img_step = 'ffhq256_img.onnx'
 
 # In order of preference
 backends = ['CPUExecutionProvider']
+
+# IMG STEP: broken?
+# mod = onnx.load(img_step)
+# onnx.checker.check_model(mod)
+# print(onnx.helper.printable_graph(mod.graph))
 
 # Run
 T = np.array([10], dtype=np.int64)
@@ -52,6 +58,8 @@ lat_params[0] = lat_params[0].astype(np.int64)
 ref = model.lat_sampl.forward(torch.from_numpy(T))
 compare(lat_params, ref)
 print('Lat-samp params match')
+
+# TODO: timestep_map: keep size=1000, just pad with invalid zeros at end?
 
 sess = ort.InferenceSession(lat_step, providers=backends)
 for i in range(T.item()):
@@ -87,27 +95,31 @@ img_params[0] = img_params[0].astype(np.int64)
 compare(img_params, model.img_sampl.forward(torch.from_numpy(T)))
 print('Img-samp params match')
 
+# Get initial from torch
+
+# TODO: needs lats from PT to work...
+lats = model.sample_lat(torch.from_numpy(T), torch.from_numpy(x)).cpu().numpy()
+
 x = np.random.randn(1, 3, 256, 256).astype(np.float32)
 sess = ort.InferenceSession(img_step, providers=backends)
-for i in range(T.item()):
+for i in trange(T.item()):
     x_out = sess.run(input_feed={
         't': (T - i - 1),
         'x': x,
         'lats': lats,
-        'timestep_map': lat_params[0].astype(np.int64),
-        'alphas_cumprod': lat_params[2],
-        'alphas_cumprod_prev': lat_params[3],
-        'sqrt_recip_alphas_cumprod': lat_params[4],
-        'sqrt_recipm1_alphas_cumprod': lat_params[5],
+        'timestep_map': img_params[0],
+        'alphas_cumprod': img_params[1],
+        'alphas_cumprod_prev': img_params[2],
+        'sqrt_recip_alphas_cumprod': img_params[3],
+        'sqrt_recipm1_alphas_cumprod': img_params[4],
     }, output_names=['output'])
-    eval_model = lambda x, t: model.img_net(x, t, cond=torch.from_numpy(lats))
-    ref = model.img_sampl.sample_incr(torch.from_numpy(T - i - 1), torch.from_numpy(x), eval_model, *(torch.from_numpy(v) for v in img_params))
+    
+    #eval_model = lambda x, t: model.img_net(x, t, cond=torch.from_numpy(lats))
+    #ref = model.img_sampl.sample_incr(torch.from_numpy(T - i - 1), torch.from_numpy(x), eval_model, *(torch.from_numpy(v) for v in img_params))
     
     #compare(x_out, [ref], rtol=1)
-    #print('.', end='')
-
-    print(x_out[0].reshape(-1)[i:i+4])
-    print(ref.numpy().reshape(-1)[i:i+4])
+    #print(x_out[0].reshape(-1)[i:i+4])
+    #print(ref.numpy().reshape(-1)[i:i+4])
     
     x = x_out[0]
 
