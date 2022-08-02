@@ -3,12 +3,9 @@
 # - coremltools (using NE)
 # - Onnxruntime (CoreML, w/ NE?) - only C++?
 
-from types import SimpleNamespace
 import torch
 import numpy as np
 from numpy.random import RandomState
-from model.unet_autoenc import AutoencReturn
-import templates_latent
 from PIL import Image
 from tqdm import trange
 import random
@@ -304,9 +301,9 @@ if __name__ == '__main__':
         configs.append('cuda_pt')
     
     if mps and mps.is_available() and mps.is_built():
+        configs.append('mps_traced')
         configs.append('mps')
         configs.append('mps_fused')
-        configs.append('mps_traced')
         configs.append('mps_pt')
         configs.append('m2_opt')
     
@@ -316,9 +313,10 @@ if __name__ == '__main__':
 
     summaries = []
     for cfg in configs:
+        print('Running', cfg)
         img, summ = run(CONFIGS[cfg](dset), seed=seed)
         summaries.append(summ)
-        #show(img)
+        show(img)
 
     print('Results:')
     for conf, summ in zip(configs, summaries):
