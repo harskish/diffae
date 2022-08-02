@@ -1,10 +1,12 @@
 # Use conda env tvm (py38)
 
+from random import Random
 from sympy import comp
 import torch
 import numpy as np
+from numpy.random import RandomState
 import onnxruntime as ort # pip install onnxruntime
-import onnx # from src, whl/onnx. Also: conda install protobuf
+#import onnx # from src, whl/onnx. Also: conda install protobuf
 from bench import CONFIGS, show
 from tqdm import trange
 
@@ -26,9 +28,10 @@ def compare(ta, tb, rtol=1e-3):
 
 # Export
 #model: DiffAEModel = CONFIGS['cpu_traced']('ffhq256', export=True)
-model: DiffAEModel = CONFIGS['cpu']('ffhq256')
+#model: DiffAEModel = CONFIGS['cpu']('ffhq256')
 lat_init = 'ffhq256_lat_init.onnx'
 lat_step = 'ffhq256_lat.onnx'
+lat_norm = 'ffhq256_lat_norm.onnx'
 img_init = 'ffhq256_img_init.onnx'
 img_step = 'ffhq256_img.onnx'
 
@@ -41,8 +44,9 @@ backends = ['CPUExecutionProvider']
 # print(onnx.helper.printable_graph(mod.graph))
 
 # Run
-T = np.array([5], dtype=np.int64)
-x = np.random.randn(1, 512).astype(np.float32)
+seed = 0
+T = np.array([10], dtype=np.int64)
+x = RandomState(seed).randn(1, 512).astype(np.float32)
 
 sess = ort.InferenceSession(lat_init, providers=backends)
 lat_params = sess.run(input_feed={ 'T': T },
@@ -55,9 +59,9 @@ lat_params = sess.run(input_feed={ 'T': T },
     ])
 
 lat_params[0] = lat_params[0].astype(np.int64)
-ref = model.lat_sampl.forward(torch.from_numpy(T))
-compare(lat_params, ref)
-print('Lat-samp params match')
+#ref = model.lat_sampl.forward(torch.from_numpy(T))
+#compare(lat_params, ref)
+#print('Lat-samp params match')
 
 # TODO: timestep_map: keep size=1000, just pad with invalid zeros at end?
 
@@ -72,14 +76,15 @@ for i in range(T.item()):
         'sqrt_recip_alphas_cumprod': lat_params[3],
         'sqrt_recipm1_alphas_cumprod': lat_params[4],
     }, output_names=['lats'])
-    eval_model = lambda x, t: model.lat_net(x, t)
-    ref = model.lat_sampl.sample_incr(torch.from_numpy(T - i - 1), torch.from_numpy(x), eval_model, *(torch.from_numpy(v) for v in lat_params))
-    compare(x_out, [ref], rtol=1e-2)
+    #eval_model = lambda x, t: model.lat_net(x, t)
+    #ref = model.lat_sampl.sample_incr(torch.from_numpy(T - i - 1), torch.from_numpy(x), eval_model, *(torch.from_numpy(v) for v in lat_params))
+    #compare(x_out, [ref], rtol=1e-2)
     print('.', end='')
     x = x_out[0]
 
-print('latent diffusions match')
-lats = x
+sess = ort.InferenceSession(lat_norm, providers=backends)
+lats = sess.run(input_feed={'lats_in': x}, output_names=['lats'])[0]
+#lats = model.lat_denorm(torch.from_numpy(x)).numpy()
 
 sess = ort.InferenceSession(img_init, providers=backends)
 img_params = sess.run(input_feed={ 'T': T },
@@ -92,18 +97,12 @@ img_params = sess.run(input_feed={ 'T': T },
     ])
 
 img_params[0] = img_params[0].astype(np.int64)
-compare(img_params, model.img_sampl.forward(torch.from_numpy(T)))
-print('Img-samp params match')
-
-# Get initial from torch
-
-# TODO: is this missing?
-lats = model.lat_denorm(lats)
+#compare(img_params, model.img_sampl.forward(torch.from_numpy(T)))
 
 # TODO: needs lats from PT to work...
-lats = model.sample_lat_loop(torch.from_numpy(T), torch.from_numpy(x)).cpu().numpy()
+#lats = model.sample_lat_loop(torch.from_numpy(T), torch.from_numpy(x)).cpu().numpy()
 
-x = np.random.randn(1, 3, 256, 256).astype(np.float32)
+x = RandomState(seed).randn(1, 3, 256, 256).astype(np.float32)
 sess = ort.InferenceSession(img_step, providers=backends)
 for i in trange(T.item()):
     x_out = sess.run(input_feed={
@@ -126,6 +125,5 @@ for i in trange(T.item()):
     
     x = x_out[0]
 
-print('Results match')
 show(x)
 print('Done')

@@ -188,8 +188,16 @@ def model_torch_traced(dev_lat, dev_img, dset, B=1, lat_fused=False, img_fused=F
             f'{model_name}.onnx',     # where to save the model (can be a file or file-like object)
             input_names = input_names,
             output_names = ['lats'],
-            do_constant_folding=False
+            #do_constant_folding=False
         )
+
+    # Latent normalization function
+    norm_fun = lambda lats : model.lat_denorm(lats)
+    jit_norm = torch.jit.trace(norm_fun, (torch.randn(B, 512)))
+    if export:
+        jit_norm.save(f'{dset}_lat_norm.pt')
+        torch.onnx.export(jit_norm, (torch.randn(B, 512)),
+            f'{dset}_lat_norm.onnx', input_names=['lats_in'], output_names=['lats'])
 
     # Image net init
     if not model.img_fused:
@@ -251,11 +259,11 @@ def model_torch_traced(dev_lat, dev_img, dset, B=1, lat_fused=False, img_fused=F
             f'{model_name}.onnx',        # where to save the model (can be a file or file-like object)
             input_names = input_names,
             output_names = ['output'],
-            do_constant_folding=False,
-            keep_initializers_as_inputs=False,
-            export_modules_as_functions=False,
-            verbose=False,
-            operator_export_type=torch.onnx.OperatorExportTypes.ONNX, # ONNX_ATEN, ONNX_ATEN_FALLBACK
+            #do_constant_folding=False,
+            #keep_initializers_as_inputs=False,
+            #export_modules_as_functions=False,
+            #verbose=False,
+            #operator_export_type=torch.onnx.OperatorExportTypes.ONNX, # ONNX_ATEN, ONNX_ATEN_FALLBACK
         )
 
     setattr(model.lat_net, 'mode', 'JIT')
@@ -340,8 +348,8 @@ if __name__ == '__main__':
     # cpu_traced   Lat: 120.78it/s, img: 0.53it/s, tot: 0.53it/s
     # mps          Lat:  29.44it/s, img: 4.05it/s, tot: 3.56it/s
     # mps_traced   Lat:  40.38it/s, img: 4.19it/s, tot: 3.80it/s
-    # m2_opt       Lat:  92.37it/s, img: 4.26it/s, tot: 4.07it/s (1.43x)
-    # full_trace                                  tot: 4.24it/s
+    # m2_opt       Lat:  92.37it/s, img: 4.26it/s, tot: 4.07it/s
+    # full_trace                                   tot: 4.24it/s
 
     # Torch-only rewrite (1.8.2022)
 
