@@ -177,7 +177,7 @@ class ModelViz(ToolbarViewer):
 class UIState:
     pkl: str = None
     T: int = 10
-    lat_T: int = 10
+    lat_T: int = 100
     seed: int = 0
     B: int = 1
     show_ds: bool = False

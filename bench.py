@@ -278,13 +278,15 @@ from functools import partial
 CONFIGS = {
     'cuda': partial(model_torch, 'cuda', 'cuda'),
     'cuda_traced': partial(model_torch_traced, 'cuda', 'cuda'),
+    'cuda_fused': partial(model_torch_traced, 'cuda', 'cuda', lat_fused=True, img_fused=True),
     'cuda_pt': partial(load_pt_model, 'cuda', 'cuda'),
     'cpu': partial(model_torch, 'cpu', 'cpu'),
     'cpu_traced': partial(model_torch_traced, 'cpu', 'cpu'),
+    'cpu_fused': partial(model_torch_traced, 'cpu', 'cpu', lat_fused=True, img_fused=True),
     'cpu_pt': partial(load_pt_model, 'cpu', 'cpu'),
     'mps': partial(model_torch, 'mps', 'mps'),
-    'mps_fused': partial(model_torch_traced, 'mps', 'mps', lat_fused=True, img_fused=True, export=False),
     'mps_traced': partial(model_torch_traced, 'mps', 'mps'),
+    'mps_fused': partial(model_torch_traced, 'mps', 'mps', lat_fused=True, img_fused=True),
     'mps_pt': partial(load_pt_model, 'mps', 'mps'),
     'm2_opt': partial(model_torch_traced, 'cpu', 'mps'),
 }
@@ -298,17 +300,19 @@ if __name__ == '__main__':
     if torch.cuda.is_available():
         configs.append('cuda')
         configs.append('cuda_traced')
+        configs.append('cuda_fused')
         configs.append('cuda_pt')
     
     if mps and mps.is_available() and mps.is_built():
-        configs.append('mps_traced')
         configs.append('mps')
+        configs.append('mps_traced')
         configs.append('mps_fused')
         configs.append('mps_pt')
         configs.append('m2_opt')
     
     configs.append('cpu')
     configs.append('cpu_traced')
+    configs.append('cpu_fused')
     configs.append('cpu_pt')
 
     summaries = []

@@ -187,9 +187,9 @@ class DiffAEModel(torch.nn.Module):
 
     # Get params used in incremental latent sampling
     @torch.jit.export
-    def get_lat_sampl_params(self, T_img: torch.Tensor):
+    def get_lat_sampl_params(self, T_lat: torch.Tensor):
         assert not self.lat_fused, 'Should not query in fused mode'
-        return self.lat_sampl.forward(T_img)
+        return self.lat_sampl.forward(T_lat)
     
     # Get params used in incremental image sampling
     @torch.jit.export
@@ -246,8 +246,8 @@ class DiffAEModel(torch.nn.Module):
         t: torch.Tensor,   # current step, T-1 -> 0
         x: torch.Tensor,   # accumulated intermediate result
     ):
-        params = self.img_sampl.forward(T) # <- if this is small, then overhead is minimal
-        return self.img_sampl.sample_incr(t, x, self.lat_net, *params)
+        params = self.lat_sampl.forward(T) # <- if this is small, then overhead is minimal
+        return self.lat_sampl.sample_incr(t, x, self.lat_net, *params)
     
     @torch.jit.export
     def sample_img_incr_fused(
