@@ -60,10 +60,10 @@ def get_samplers(conf, t_img=10, t_lat=10):
 
     return (sampl, lat_sampl)
 
-def run(model: DiffAEModel, steps=10, B=1, verbose=True, seed=None):
+def run(model: DiffAEModel, steps=200, B=1, verbose=True, seed=None):
     random.seed(time.time())
     seed = random.randint(0, 1<<32-1) if seed is None else seed
-    steps_lat = 10
+    steps_lat = 200
     dev_lat = model.dev_lat
     dev_img = model.dev_img
     
@@ -329,32 +329,42 @@ if __name__ == '__main__':
     print('Done')
 
     # M2 MacBook Air 13" (4E+4P+10GPU)
-    # cpu         Lat:  46.85it/s, img: 0.46it/s, tot: 0.46it/s
-    # cpu_traced  Lat: 170.92it/s, img: 0.47it/s, tot: 0.47it/s
-    # mps         Lat:  20.82it/s, img: 2.99it/s, tot: 2.61it/s
-    # mps_traced  Lat:  34.98it/s, img: 3.01it/s, tot: 2.77it/s
-    # m2_opt      Lat:  62.44it/s, img: 2.98it/s, tot: 2.84it/s
+    # cpu          Lat:  46.85it/s, img: 0.46it/s, tot: 0.46it/s
+    # cpu_traced   Lat: 170.92it/s, img: 0.47it/s, tot: 0.47it/s
+    # mps          Lat:  20.82it/s, img: 2.99it/s, tot: 2.61it/s
+    # mps_traced   Lat:  34.98it/s, img: 3.01it/s, tot: 2.77it/s
+    # m2_opt       Lat:  62.44it/s, img: 2.98it/s, tot: 2.84it/s
 
     # M1 Pro MacBook Pro 14" (2E+6P+14GPU)
-    # cpu         Lat:  86.85it/s, img: 0.54it/s, tot: 0.54it/s
-    # cpu_traced  Lat: 120.78it/s, img: 0.53it/s, tot: 0.53it/s
-    # mps         Lat:  29.44it/s, img: 4.05it/s, tot: 3.56it/s
-    # mps_traced  Lat:  40.38it/s, img: 4.19it/s, tot: 3.80it/s
-    # m2_opt      Lat:  92.37it/s, img: 4.26it/s, tot: 4.07it/s (1.43x)
+    # cpu          Lat:  86.85it/s, img: 0.54it/s, tot: 0.54it/s
+    # cpu_traced   Lat: 120.78it/s, img: 0.53it/s, tot: 0.53it/s
+    # mps          Lat:  29.44it/s, img: 4.05it/s, tot: 3.56it/s
+    # mps_traced   Lat:  40.38it/s, img: 4.19it/s, tot: 3.80it/s
+    # m2_opt       Lat:  92.37it/s, img: 4.26it/s, tot: 4.07it/s (1.43x)
     # full_trace                                  tot: 4.24it/s
 
     # Torch-only rewrite (1.8.2022)
 
     # M1 Pro MacBook Pro 14" (2E+6P+14GPU) - no debugger
-    # cpu         Lat:  90.62it/s, img: 0.50it/s, tot: 0.50it/s
-    # cpu_traced  Lat: 118.95it/s, img: 0.52it/s, tot: 0.52it/s
-    # mps         Lat:  71.70it/s, img: 4.41it/s, tot: 4.15it/s
-    # mps_traced  Lat: 107.92it/s, img: 4.44it/s, tot: 4.26it/s
-    # m2_opt      Lat:  88.16it/s, img: 4.35it/s, tot: 4.14it/s
+    # cpu          Lat:  90.62it/s, img: 0.50it/s, tot: 0.50it/s
+    # cpu_traced   Lat: 118.95it/s, img: 0.52it/s, tot: 0.52it/s
+    # mps          Lat:  71.70it/s, img: 4.41it/s, tot: 4.15it/s
+    # mps_traced   Lat: 107.92it/s, img: 4.44it/s, tot: 4.26it/s
+    # m2_opt       Lat:  88.16it/s, img: 4.35it/s, tot: 4.14it/s
     
     # M1 Pro MacBook Pro 14" (2E+6P+14GPU) - with debugger
-    # cpu         Lat:  51.82it/s, img: 0.50it/s, tot: 0.49it/s
-    # cpu_traced  Lat: 121.03it/s, img: 0.50it/s, tot: 0.50it/s
-    # mps         Lat:  51.25it/s, img: 4.28it/s, tot: 3.95it/s
-    # mps_traced  Lat: 101.61it/s, img: 4.35it/s, tot: 4.17it/s
-    # m2_opt      Lat:  88.10it/s, img: 4.41it/s, tot: 4.20it/s
+    # cpu          Lat:  51.82it/s, img: 0.50it/s, tot: 0.49it/s
+    # cpu_traced   Lat: 121.03it/s, img: 0.50it/s, tot: 0.50it/s
+    # mps          Lat:  51.25it/s, img: 4.28it/s, tot: 3.95it/s
+    # mps_traced   Lat: 101.61it/s, img: 4.35it/s, tot: 4.17it/s
+    # m2_opt       Lat:  88.10it/s, img: 4.41it/s, tot: 4.20it/s
+
+    # i5-12600k + RTX 2080 - no debugger, 200+200 sampl
+    # cuda         Lat: 222.28it/s, img: 6.96it/s, tot: 6.75it/s
+    # cuda_traced  Lat: 876.19it/s, img: 7.10it/s, tot: 7.05it/s
+    # cuda_fused   Lat: 814.24it/s, img: 7.15it/s, tot: 7.09it/s
+    # cuda_pt      Lat: 214.04it/s, img: 6.85it/s, tot: 6.63it/s
+    # cpu          Lat: 119.99it/s, img: 0.63it/s, tot: 0.63it/s
+    # cpu_traced   Lat: 225.53it/s, img: 0.64it/s, tot: 0.64it/s
+    # cpu_fused    Lat: 219.16it/s, img: 0.65it/s, tot: 0.64it/s
+    # cpu_pt       Lat: 129.14it/s, img: 0.66it/s, tot: 0.66it/s
