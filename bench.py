@@ -84,7 +84,7 @@ def run(model: DiffAEModel, steps=10, B=1, verbose=True, seed=None):
     t0 = time.time()
     latent_noise = torch.tensor(RandomState(seed).randn(B, 512), dtype=torch.float32).to(dev_lat)
     T = torch.tensor([steps_lat], dtype=torch.int32)
-    lats = model.sample_lat(T, latent_noise)
+    lats = model.sample_lat(T, latent_noise).to(dev_img)
     t1 = time.time()
     
     # Initial value: spaial noise
@@ -121,6 +121,7 @@ def model_torch(dev_lat, dev_img, dset):
 # https://ppwwyyxx.com/blog/2022/TorchScript-Tracing-vs-Scripting/
 def model_torch_traced(dev_lat, dev_img, dset, B=1, export=False) -> DiffAEModel:
     model = model_torch(dev_lat, dev_img, dset)
+    check_trace = 'mps' not in [dev_img, dev_lat]
     
     if is_set('USE_MKLDNN') and is_set('BUILD_ONEDNN_GRAPH'):
         torch.jit.enable_onednn_fusion(True)
@@ -140,7 +141,7 @@ def model_torch_traced(dev_lat, dev_img, dset, B=1, export=False) -> DiffAEModel
     # Latent net init
     T = T.to(dev_lat)
     fwd_fun = lambda T : model.lat_sampl.forward(T)
-    jit_lat_init = torch.jit.trace(fwd_fun, (T), check_trace=False)
+    jit_lat_init = torch.jit.trace(fwd_fun, (T), check_trace=check_trace)
     if export:
         jit_lat_init.save(f'{dset}_lat_init.pt')
         torch.onnx.export(
@@ -167,7 +168,7 @@ def model_torch_traced(dev_lat, dev_img, dset, B=1, export=False) -> DiffAEModel
     t = t.to(dev_lat)
     x0 = torch.randn(B, 512).to(dev_lat)
     example_vs = model.lat_sampl.forward(T)
-    jit_lat = torch.jit.trace(fwd_fun, (t, x0, *example_vs), check_trace=False)
+    jit_lat = torch.jit.trace(fwd_fun, (t, x0, *example_vs), check_trace=check_trace)
     if export:
         jit_lat.save(f'{dset}_lat.pt')
         torch.onnx.export(
@@ -195,7 +196,7 @@ def model_torch_traced(dev_lat, dev_img, dset, B=1, export=False) -> DiffAEModel
     # Image net init
     T = T.to(dev_img)
     fwd_fun = lambda T : model.img_sampl.forward(T)
-    jit_img_init = torch.jit.trace(fwd_fun, (T), check_trace=False)
+    jit_img_init = torch.jit.trace(fwd_fun, (T), check_trace=check_trace)
     if export:
         jit_img_init.save(f'{dset}_img_init.pt')
         torch.onnx.export(
@@ -223,7 +224,7 @@ def model_torch_traced(dev_lat, dev_img, dset, B=1, export=False) -> DiffAEModel
     x0 = torch.randn(B, 3, model.res, model.res).to(dev_img)
     lats = torch.randn(B, 512).to(dev_img)
     example_vs = model.img_sampl.forward(T)
-    jit_img = torch.jit.trace(fwd_fun, (t, x0, lats, *example_vs), check_trace=True)
+    jit_img = torch.jit.trace(fwd_fun, (t, x0, lats, *example_vs), check_trace=check_trace)
     if export:
         jit_img.save(f'{dset}_img.pt')
         torch.onnx.export(
@@ -286,6 +287,7 @@ CONFIGS = {
 if __name__ == '__main__':
     dset = 'ffhq256'
     mps = getattr(torch.backends, 'mps', None)
+    seed = random.randint(0, 1<<32-1)
     
     configs = []
     if torch.cuda.is_available():
@@ -302,12 +304,12 @@ if __name__ == '__main__':
     configs.append('cpu')
     configs.append('cpu_traced')
     configs.append('cpu_pt')
-    
+
     summaries = []
     for cfg in configs:
-        img, summ = run(CONFIGS[cfg](dset))
+        img, summ = run(CONFIGS[cfg](dset), seed=seed)
         summaries.append(summ)
-        show(img)
+        #show(img)
 
     print('Results:')
     for summ in summaries:

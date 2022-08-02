@@ -144,10 +144,10 @@ class DiffAEModel(torch.nn.Module):
         self.dset_lats = model.conds
 
         self.res = conf.img_size
-        self.lat_sampl = DDIMSamplerLat(conf)
-        self.img_sampl = DDIMSamplerImg(conf)
-        self.lat_net = model.ema_model.latent_net.to(dev_lat)
-        self.img_net = model.ema_model.to(dev_img)
+        self.lat_sampl = DDIMSamplerLat(conf).to(dev_lat)
+        self.img_sampl = DDIMSamplerImg(conf).to(dev_img)
+        self.img_net = model.ema_model.to(dev_img) # sets both
+        self.lat_net = model.ema_model.latent_net.to(dev_lat) # overrides
         self.dev_lat = torch.device(dev_lat)
         self.dev_img = torch.device(dev_img)
 
@@ -163,7 +163,7 @@ class DiffAEModel(torch.nn.Module):
     
     def forward(self, T_lat: torch.Tensor, T_img: torch.Tensor, x0_lat: torch.Tensor, x0_img: torch.Tensor):
         lats = self.sample_lat(T_lat, x0_lat)
-        img = self.sample_img(T_img, x0_img, lats)
+        img = self.sample_img(T_img, x0_img, lats.to(self.dev_img))
         return img
 
     @torch.jit.export
