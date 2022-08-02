@@ -41,7 +41,7 @@ backends = ['CPUExecutionProvider']
 # print(onnx.helper.printable_graph(mod.graph))
 
 # Run
-T = np.array([10], dtype=np.int64)
+T = np.array([5], dtype=np.int64)
 x = np.random.randn(1, 512).astype(np.float32)
 
 sess = ort.InferenceSession(lat_init, providers=backends)
@@ -97,8 +97,11 @@ print('Img-samp params match')
 
 # Get initial from torch
 
+# TODO: is this missing?
+lats = model.lat_denorm(lats)
+
 # TODO: needs lats from PT to work...
-lats = model.sample_lat(torch.from_numpy(T), torch.from_numpy(x)).cpu().numpy()
+lats = model.sample_lat_loop(torch.from_numpy(T), torch.from_numpy(x)).cpu().numpy()
 
 x = np.random.randn(1, 3, 256, 256).astype(np.float32)
 sess = ort.InferenceSession(img_step, providers=backends)

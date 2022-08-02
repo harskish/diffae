@@ -67,7 +67,6 @@ def run(model: DiffAEModel, steps=10, B=1, verbose=True, seed=None):
     random.seed(time.time())
     seed = random.randint(0, 1<<32-1) if seed is None else seed
     steps_lat = 10
-    ran_fun = trange if verbose else range
     dev_lat = model.dev_lat
     dev_img = model.dev_img
     
@@ -83,18 +82,13 @@ def run(model: DiffAEModel, steps=10, B=1, verbose=True, seed=None):
 
     t0 = time.time()
     latent_noise = torch.tensor(RandomState(seed).randn(B, 512), dtype=torch.float32).to(dev_lat)
-    T = torch.tensor([steps_lat], dtype=torch.int32)
-    lats = model.sample_lat(T, latent_noise).to(dev_img)
+    T = torch.tensor([steps_lat], dtype=torch.int64, device=dev_lat)
+    lats = model.sample_lat_loop(T, latent_noise).to(dev_img)
     t1 = time.time()
     
     # Initial value: spaial noise
     intermed = torch.tensor(RandomState(seed).randn(B, 3, model.res, model.res), dtype=torch.float32).to(dev_img)
-    params = model.get_img_sampl_params(torch.tensor([steps], dtype=torch.int32))
-
-    for i in ran_fun(steps):
-        t = torch.tensor([steps - i - 1] * B, device=dev_img)
-        intermed = model.sample_img_incr(t, intermed, lats, *params)
-
+    intermed = model.sample_img_loop(T, intermed, lats)
     t2 = time.time()
     
     it_lat = (t1 - t0) / steps_lat
@@ -112,21 +106,25 @@ def run(model: DiffAEModel, steps=10, B=1, verbose=True, seed=None):
 
     return intermed, summary
 
-def model_torch(dev_lat, dev_img, dset):
-    model = DiffAEModel(dset, dev_lat, dev_img)
+# Fusing only makes sense for traced models
+def _get_model(dev_lat, dev_img, dset, lat_fused=False, img_fused=False):
+    model = DiffAEModel(dset, dev_lat, dev_img, lat_fused=lat_fused, img_fused=img_fused)
     setattr(model.lat_net, 'mode', 'INT')
     setattr(model.img_net, 'mode', 'INT')
     return model
 
+def model_torch(dev_lat, dev_img, dset):
+    return _get_model(dev_lat, dev_img, dset, False, False)
+
 # https://ppwwyyxx.com/blog/2022/TorchScript-Tracing-vs-Scripting/
-def model_torch_traced(dev_lat, dev_img, dset, B=1, export=False) -> DiffAEModel:
-    model = model_torch(dev_lat, dev_img, dset)
+def model_torch_traced(dev_lat, dev_img, dset, B=1, lat_fused=False, img_fused=False, export=False) -> DiffAEModel:
+    model = _get_model(dev_lat, dev_img, dset, lat_fused, img_fused)
     check_trace = 'mps' not in [dev_img, dev_lat]
     
     if is_set('USE_MKLDNN') and is_set('BUILD_ONEDNN_GRAPH'):
         torch.jit.enable_onednn_fusion(True)
 
-    T = torch.tensor([10] * B)
+    T = torch.tensor([10] * B, dtype=torch.int64).to(dev_lat)
     t = T - 1
 
     # torch.jit.trace(lambda) => TraceFunction
@@ -139,108 +137,122 @@ def model_torch_traced(dev_lat, dev_img, dset, B=1, export=False) -> DiffAEModel
     # example_outputs no longer exists in torch 1.11+
 
     # Latent net init
-    T = T.to(dev_lat)
-    fwd_fun = lambda T : model.lat_sampl.forward(T)
-    jit_lat_init = torch.jit.trace(fwd_fun, (T), check_trace=check_trace)
-    if export:
-        jit_lat_init.save(f'{dset}_lat_init.pt')
-        torch.onnx.export(
-            jit_lat_init,                 # model being run
-            (T),                          # model input (or a tuple for multiple inputs)
-            f'{dset}_lat_init.onnx',      # where to save the model (can be a file or file-like object)
-            input_names = ['T'],          # the model's input names
-            output_names = [              # the model's output names
-                'timestep_map',
-                'alphas_cumprod',
-                'alphas_cumprod_prev',
-                'sqrt_recip_alphas_cumprod',
-                'sqrt_recipm1_alphas_cumprod',
-            ]
-        )
+    if not model.lat_fused:
+        fwd_fun = lambda T : model.lat_sampl.forward(T)
+        jit_lat_init = torch.jit.trace(fwd_fun, (T), check_trace=check_trace)
+        if export:
+            jit_lat_init.save(f'{dset}_lat_init.pt')
+            torch.onnx.export(
+                jit_lat_init,                 # model being run
+                (T),                          # model input (or a tuple for multiple inputs)
+                f'{dset}_lat_init.onnx',      # where to save the model (can be a file or file-like object)
+                input_names = ['T'],          # the model's input names
+                output_names = [              # the model's output names
+                    'timestep_map',
+                    'alphas_cumprod',
+                    'alphas_cumprod_prev',
+                    'sqrt_recip_alphas_cumprod',
+                    'sqrt_recipm1_alphas_cumprod',
+                ]
+            )
 
-    # Replace with jitted
-    model.lat_sampl.forward = jit_lat_init
+        # Replace with jitted
+        model.lat_sampl.forward = jit_lat_init
 
-    # # Latent net
-    def fwd_fun(t, x, *vs):
-        eval_fn = lambda x, t: model.lat_net.forward(x, t)
-        return model.lat_sampl.sample_incr(t, x, eval_fn, *vs)
-    t = t.to(dev_lat)
+    # Latent net
     x0 = torch.randn(B, 512).to(dev_lat)
-    example_vs = model.lat_sampl.forward(T)
-    jit_lat = torch.jit.trace(fwd_fun, (t, x0, *example_vs), check_trace=check_trace)
+    jit_lat = None
+    input_names = []
+    model_name = ''
+    ex_inputs = []
+    
+    if model.lat_fused:
+        fwd_fun = lambda T, t, x : model.sample_lat_incr_fused(T, t, x)
+        ex_inputs = (T, t, x0)
+        input_names = ['T', 't', 'x']
+        jit_lat = torch.jit.trace(fwd_fun, ex_inputs, check_trace=check_trace)
+        model_name = f'{dset}_lat_fused'
+        model.sample_lat_incr_fused = jit_lat
+    else:
+        fwd_fun = lambda t, x, *vs : model.lat_sampl.sample_incr(t, x, model.lat_net, *vs)
+        ex_inputs = (t, x0, *model.lat_sampl.forward(T))
+        input_names = ['t', 'x', 'timestep_map', 'alphas_cumprod', 'alphas_cumprod_prev', 'sqrt_recip_alphas_cumprod', 'sqrt_recipm1_alphas_cumprod']
+        jit_lat = torch.jit.trace(fwd_fun, ex_inputs, check_trace=check_trace)
+        model_name = f'{dset}_lat'
+        #def new_fwd_lat(t, x, eval_model, *params):
+        #    return jit_lat(t, x, *params)
+        model.lat_sampl.sample_incr = lambda t, x, _, *params : jit_lat(t, x, *params)
+
     if export:
-        jit_lat.save(f'{dset}_lat.pt')
+        jit_lat.save(f'{model_name}.pt')
         torch.onnx.export(
             jit_lat,                  # model being run
-            (t, x0, *example_vs),     # model input (or a tuple for multiple inputs)
-            f'{dset}_lat.onnx',       # where to save the model (can be a file or file-like object)
-            input_names = [           # the model's input names
-                't',
-                'x',
-                'timestep_map',
-                'alphas_cumprod',
-                'alphas_cumprod_prev',
-                'sqrt_recip_alphas_cumprod',
-                'sqrt_recipm1_alphas_cumprod',
-            ],
+            ex_inputs,                # model input (or a tuple for multiple inputs)
+            f'{model_name}.onnx',     # where to save the model (can be a file or file-like object)
+            input_names = input_names,
             output_names = ['lats'],
             do_constant_folding=False
         )
-    
-    # Replace with jitted
-    def new_fwd_lat(t, x, eval_model, *params):
-        return jit_lat(t, x, *params)
-    model.lat_sampl.sample_incr = new_fwd_lat
 
     # Image net init
-    T = T.to(dev_img)
-    fwd_fun = lambda T : model.img_sampl.forward(T)
-    jit_img_init = torch.jit.trace(fwd_fun, (T), check_trace=check_trace)
-    if export:
-        jit_img_init.save(f'{dset}_img_init.pt')
-        torch.onnx.export(
-            jit_img_init,                 # model being run
-            (T),                          # model input (or a tuple for multiple inputs)
-            f'{dset}_img_init.onnx',      # where to save the model (can be a file or file-like object)
-            input_names = ['T'],          # the model's input names
-            output_names = [              # the model's output names
-                'timestep_map',
-                'alphas_cumprod',
-                'alphas_cumprod_prev',
-                'sqrt_recip_alphas_cumprod',
-                'sqrt_recipm1_alphas_cumprod',
-            ]
-        )
+    if not model.img_fused:
+        T = T.to(dev_img)
+        fwd_fun = lambda T : model.img_sampl.forward(T)
+        jit_img_init = torch.jit.trace(fwd_fun, (T), check_trace=check_trace)
+        if export:
+            jit_img_init.save(f'{dset}_img_init.pt')
+            torch.onnx.export(
+                jit_img_init,                 # model being run
+                (T),                          # model input (or a tuple for multiple inputs)
+                f'{dset}_img_init.onnx',      # where to save the model (can be a file or file-like object)
+                input_names = ['T'],          # the model's input names
+                output_names = [              # the model's output names
+                    'timestep_map',
+                    'alphas_cumprod',
+                    'alphas_cumprod_prev',
+                    'sqrt_recip_alphas_cumprod',
+                    'sqrt_recipm1_alphas_cumprod',
+                ]
+            )
 
-    # Replace with jitted
-    model.img_sampl.forward = jit_img_init
+        # Replace with jitted
+        model.img_sampl.forward = jit_img_init
 
     # Image net
-    def fwd_fun(t, x, lats, *vs):
-        eval_fn = lambda x, t: model.img_net.forward(x, t, cond=lats)
-        return model.img_sampl.sample_incr(t, x, eval_fn, *vs)
+    jit_img = None
+    input_names = []
+    model_name = ''
+    ex_inputs = []
+
+    lats = torch.randn(B, 512).to(dev_img)
+    T = T.to(dev_img)
     t = t.to(dev_img)
     x0 = torch.randn(B, 3, model.res, model.res).to(dev_img)
-    lats = torch.randn(B, 512).to(dev_img)
-    example_vs = model.img_sampl.forward(T)
-    jit_img = torch.jit.trace(fwd_fun, (t, x0, lats, *example_vs), check_trace=check_trace)
+    
+    if model.img_fused:
+        fwd_fun = lambda T, t, x, lats : model.sample_img_incr_fused(T, t, x, lats)
+        ex_inputs = (T, t, x0, lats)
+        input_names = ['T', 't', 'x', 'lats']
+        jit_img = torch.jit.trace(fwd_fun, ex_inputs, check_trace=check_trace)
+        model_name = f'{dset}_img_fused'
+        model.sample_img_incr_fused = jit_img
+    else:
+        fwd_fun = lambda t, x, lats, *vs : model.img_sampl.sample_incr(t, x, partial(model.img_net, cond=lats), *vs)
+        ex_inputs = (t, x0, lats, *model.img_sampl.forward(T))
+        input_names = ['t', 'x', 'lats', 'timestep_map', 'alphas_cumprod', 'alphas_cumprod_prev', 'sqrt_recip_alphas_cumprod', 'sqrt_recipm1_alphas_cumprod']
+        jit_img = torch.jit.trace(fwd_fun, ex_inputs, check_trace=check_trace)
+        model_name = f'{dset}_img'
+        #def new_fwd_img(t, x, eval_model, *params):
+        #    return jit_img(t, x, eval_model.keywords['cond'], *params)
+        model.img_sampl.sample_incr = lambda t, x, mod, *params : jit_img(t, x, mod.keywords['cond'], *params)
+
     if export:
-        jit_img.save(f'{dset}_img.pt')
+        jit_img.save(f'{model_name}.pt')
         torch.onnx.export(
             jit_img,                     # model being run
-            (t, x0, lats, *example_vs),  # model input (or a tuple for multiple inputs)
-            f'{dset}_img.onnx',          # where to save the model (can be a file or file-like object)
-            input_names = [              # the model's input names
-                't',
-                'x',
-                'lats',
-                'timestep_map',
-                'alphas_cumprod',
-                'alphas_cumprod_prev',
-                'sqrt_recip_alphas_cumprod',
-                'sqrt_recipm1_alphas_cumprod',
-            ],
+            ex_inputs,                   # model input (or a tuple for multiple inputs)
+            f'{model_name}.onnx',        # where to save the model (can be a file or file-like object)
+            input_names = input_names,
             output_names = ['output'],
             do_constant_folding=False,
             keep_initializers_as_inputs=False,
@@ -248,11 +260,6 @@ def model_torch_traced(dev_lat, dev_img, dset, B=1, export=False) -> DiffAEModel
             verbose=False,
             operator_export_type=torch.onnx.OperatorExportTypes.ONNX, # ONNX_ATEN, ONNX_ATEN_FALLBACK
         )
-
-    # Replace with jitted
-    def new_fwd_img(t, x, eval_model, *params):
-        return jit_img(t, x, eval_model.keywords['cond'], *params)
-    model.img_sampl.sample_incr = new_fwd_img
 
     setattr(model.lat_net, 'mode', 'JIT')
     setattr(model.img_net, 'mode', 'JIT')
@@ -279,6 +286,7 @@ CONFIGS = {
     'cpu_traced': partial(model_torch_traced, 'cpu', 'cpu'),
     'cpu_pt': partial(load_pt_model, 'cpu', 'cpu'),
     'mps': partial(model_torch, 'mps', 'mps'),
+    'mps_fused': partial(model_torch_traced, 'mps', 'mps', lat_fused=True, img_fused=True, export=False),
     'mps_traced': partial(model_torch_traced, 'mps', 'mps'),
     'mps_pt': partial(load_pt_model, 'mps', 'mps'),
     'm2_opt': partial(model_torch_traced, 'cpu', 'mps'),
@@ -297,6 +305,7 @@ if __name__ == '__main__':
     
     if mps and mps.is_available() and mps.is_built():
         configs.append('mps')
+        configs.append('mps_fused')
         configs.append('mps_traced')
         configs.append('mps_pt')
         configs.append('m2_opt')
@@ -312,8 +321,8 @@ if __name__ == '__main__':
         #show(img)
 
     print('Results:')
-    for summ in summaries:
-        print(summ)
+    for conf, summ in zip(configs, summaries):
+        print(f'{conf}: {summ}')
 
     print('Done')
 
