@@ -85,7 +85,7 @@ def run(model: DiffAEModel, steps=200, B=1, verbose=True, seed=None):
     
     # Initial value: spaial noise
     intermed = torch.tensor(RandomState(seed).randn(B, 3, model.res, model.res), dtype=torch.float32).to(dev_img)
-    intermed = model.sample_img_loop(T, intermed, lats)
+    intermed = model.sample_img_loop(T.to(dev_img), intermed, lats)
     t2 = time.time()
     
     it_lat = (t1 - t0) / steps_lat
@@ -316,6 +316,7 @@ CONFIGS = {
     'mps_traced': partial(model_torch_traced, 'mps', 'mps'),
     'mps_fused': partial(model_torch_traced, 'mps', 'mps', fuse_lat=True, fuse_img=True),
     'mps_pt': partial(load_pt_model, 'mps', 'mps'),
+    'mps_opt': partial(model_torch_traced, 'mps', 'mps', trace_img=False),
     'm2_opt': partial(model_torch_traced, 'cpu', 'mps'),
 }
 
@@ -326,14 +327,15 @@ if __name__ == '__main__':
     
     configs = []
     if torch.cuda.is_available():
-        configs.append('cuda_opt')
         configs.append('cuda')
+        configs.append('cuda_opt')
         configs.append('cuda_traced')
         configs.append('cuda_fused')
         configs.append('cuda_pt')
     
     if mps and mps.is_available() and mps.is_built():
         configs.append('mps')
+        configs.append('mps_opt')
         configs.append('mps_traced')
         configs.append('mps_fused')
         configs.append('mps_pt')
@@ -388,7 +390,9 @@ if __name__ == '__main__':
     # mps_traced   Lat: 101.61it/s, img: 4.35it/s, tot: 4.17it/s
     # m2_opt       Lat:  88.10it/s, img: 4.41it/s, tot: 4.20it/s
 
-    # i5-12600k + RTX 2080 - no debugger, 200+200 sampl
+    # Increates sample counts to 200+200
+
+    # i5-12600k + RTX 2080 - no debugger
     # cuda         Lat: 222.28it/s, img: 6.96it/s, tot: 6.75it/s
     # cuda_traced  Lat: 876.19it/s, img: 7.10it/s, tot: 7.05it/s
     # cuda_fused   Lat: 814.24it/s, img: 7.15it/s, tot: 7.09it/s
@@ -397,3 +401,18 @@ if __name__ == '__main__':
     # cpu_traced   Lat: 225.53it/s, img: 0.64it/s, tot: 0.64it/s
     # cpu_fused    Lat: 219.16it/s, img: 0.65it/s, tot: 0.64it/s
     # cpu_pt       Lat: 129.14it/s, img: 0.66it/s, tot: 0.66it/s
+
+    # Device transfer optimizations (3.8.2022)
+
+    # M1 Pro MacBook Pro 14" (2E+6P+14GPU) - no debugger
+    # cpu          Lat:  92.76it/s, img: 0.52it/s, tot: 0.51it/s
+    # cpu_traced   Lat: 125.21it/s, img: 0.54it/s, tot: 0.53it/s
+    # cpu_fused    Lat: 123.99it/s, img: 0.54it/s, tot: 0.54it/s
+    # cpu_pt       Lat:  92.34it/s, img: 0.54it/s, tot: 0.54it/s
+    # mps          Lat: 114.75it/s, img: 4.44it/s, tot: 4.27it/s
+    # mps_traced   Lat: 182.43it/s, img: 4.51it/s, tot: 4.40it/s
+    # mps_fused    Lat: 143.47it/s, img: 4.37it/s, tot: 4.24it/s
+    # mps_pt       Lat: 114.61it/s, img: 4.59it/s, tot: 4.42it/s
+    # mps_opt      Lat: 189.42it/s, img: 4.45it/s, tot: 4.35it/s
+    # m2_opt       Lat: 123.58it/s, img: 4.58it/s, tot: 4.42it/s
+    

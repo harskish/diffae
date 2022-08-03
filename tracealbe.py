@@ -7,10 +7,15 @@ from functools import partial
 
 # Numerically unstable, but probably OK for small tensors
 def onnx_compatible_cumprod(t: torch.Tensor, dim: int=0):
-    x = t                        # [1, 2]
-    x = torch.log(x)             # [log(1), log(2)]
-    x = torch.cumsum(x, dim=dim) # [log(1), log(1)+log(2)] = [log(1), log(1*2)]
-    x = torch.exp(x)             # [e^log(1), e^log(1*2)] = [1, 1*2]
+    # TODO: Cumsum not available (3.8.2022)
+    # https://github.com/pytorch/pytorch/issues/77764
+    if t.device.type == 'mps':
+        x = t.to('cpu').log().cumsum(dim=dim).exp().to('mps')
+    else:
+        x = t                        # [a, b]
+        x = torch.log(x)             # [log(a), log(b)]
+        x = torch.cumsum(x, dim=dim) # [log(a), log(a)+log(b)] = [log(a), log(a*b)]
+        x = torch.exp(x)             # [e^log(a), e^log(a*b)] = [a, a*b]
     return x
 
 # Traceable sampler

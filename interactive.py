@@ -70,9 +70,12 @@ class ModelViz(ToolbarViewer):
         self.state.pkl = args.model
         self.G_lock = Lock()
 
+        # Optimized models:
+        #  - fast latent sampling (jitted)
+        #  - fast startup (img not jitted)
         default_backends = {
-            'mps': 'mps',
             'cpu': 'cpu',
+            'mps': 'mps_opt',
             'cuda': 'cuda_opt',
         }
 
