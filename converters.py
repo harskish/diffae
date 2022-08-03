@@ -1,5 +1,6 @@
 # Use conda env tvm (py38)
 
+from multiprocessing.pool import RUN
 from random import Random
 from sympy import comp
 import torch
@@ -28,6 +29,7 @@ def compare(ta, tb, rtol=1e-3):
 
 # Export
 #model: DiffAEModel = CONFIGS['cpu_traced']('ffhq256', export=True)
+#model: DiffAEModel = CONFIGS['cuda_traced_fp16']('ffhq256', export=True)
 #model: DiffAEModel = CONFIGS['cpu']('ffhq256')
 lat_init = 'ffhq256_lat_init.onnx'
 lat_step = 'ffhq256_lat.onnx'
@@ -50,6 +52,8 @@ x_lat = RandomState(seed).randn(1, 512).astype(np.float32)
 x_img = RandomState(seed).randn(1, 3, 256, 256).astype(np.float32)
 
 def run_full():
+    global x_lat, x_img
+
     sess = ort.InferenceSession(lat_init, providers=backends)
     lat_params = sess.run(input_feed={ 'T': T },
         output_names=[
@@ -68,9 +72,9 @@ def run_full():
     # TODO: timestep_map: keep size=1000, just pad with invalid zeros at end?
     sess = ort.InferenceSession(lat_step, providers=backends)
     for i in range(T.item()):
-        x = sess.run(input_feed={
+        x_lat = sess.run(input_feed={
             't': (T - i - 1),
-            'x': x,
+            'x': x_lat,
             'timestep_map': lat_params[0],
             'alphas_cumprod': lat_params[1],
             'alphas_cumprod_prev': lat_params[2],
@@ -79,7 +83,7 @@ def run_full():
         }, output_names=['lats'])[0]
 
     sess = ort.InferenceSession(lat_norm, providers=backends)
-    lats = sess.run(input_feed={'lats_in': x}, output_names=['lats'])[0]
+    lats = sess.run(input_feed={'lats_in': x_lat}, output_names=['lats'])[0]
 
     sess = ort.InferenceSession(img_init, providers=backends)
     img_params = sess.run(input_feed={ 'T': T },
@@ -95,9 +99,9 @@ def run_full():
 
     sess = ort.InferenceSession(img_step, providers=backends)
     for i in trange(T.item()):
-        x = sess.run(input_feed={
+        x_img = sess.run(input_feed={
             't': (T - i - 1),
-            'x': x,
+            'x': x_img,
             'lats': lats,
             'timestep_map': img_params[0],
             'alphas_cumprod': img_params[1],
@@ -106,8 +110,11 @@ def run_full():
             'sqrt_recipm1_alphas_cumprod': img_params[4],
         }, output_names=['output'])[0]
     
-    return x
+    return x_img
 
+def run_fused():
+    global x_lat, x_img
+    raise NotImplementedError()
 
 show(run_full())
 show(run_fused())

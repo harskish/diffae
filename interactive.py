@@ -76,7 +76,7 @@ class ModelViz(ToolbarViewer):
         default_backends = {
             'cpu': 'cpu',
             'mps': 'mps_opt',
-            'cuda': 'cuda_opt',
+            'cuda': 'cuda_opt_fp16',
         }
 
         self.state.backend = default_backends[device]

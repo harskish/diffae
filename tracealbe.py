@@ -4,6 +4,19 @@ from typing import Callable
 from templates import LitModel
 import templates_latent
 from functools import partial
+from contextlib import nullcontext # py3.7+
+
+# Autocast: automatic mixed precision
+autocast = lambda dev, enabled : nullcontext
+if hasattr(torch, 'amp'):
+    # torch.amp supports multiple device types
+    from torch.amp import autocast as _autocast # type: ignore
+    autocast = lambda dev, enabled: _autocast(dev if enabled else 'cpu', enabled=enabled)
+elif hasattr(torch.cuda, 'amp'):
+    # Sometimes available just for CUDA
+    from torch.cuda.amp import autocast as _autocast
+    autocast = lambda _, enabled : _autocast(enabled=enabled)
+
 
 # Numerically unstable, but probably OK for small tensors
 def onnx_compatible_cumprod(t: torch.Tensor, dim: int=0):
@@ -20,7 +33,7 @@ def onnx_compatible_cumprod(t: torch.Tensor, dim: int=0):
 
 # Traceable sampler
 class _DDIMSamplerTorch(torch.nn.Module):
-    def __init__(self, conf, dtype=torch.float32, is_lat=False):
+    def __init__(self, conf, dtype=torch.float32, fp16=False, is_lat=False):
         super().__init__()
 
         # Compute alphas based on T_orig
@@ -33,6 +46,7 @@ class _DDIMSamplerTorch(torch.nn.Module):
             np.cumprod(alphas, axis=0), dtype=dtype)) # constant
         self.T_orig = conf.T # constant
         self.is_lat = is_lat
+        self.fp16 = fp16
 
     # Sample incrementally (single iteration)
     def sample_incr(
@@ -67,8 +81,10 @@ class _DDIMSamplerTorch(torch.nn.Module):
                 res = res[..., None]
             return res.expand(broadcast_shape)
 
-        model_forward = eval_model(x, timestep_map[t])
-        model_output = model_forward.pred
+        # FP16
+        with autocast(x.device.type, enabled=self.fp16):
+            model_forward = eval_model(x, timestep_map[t])
+            model_output = model_forward.pred
 
         pred_xstart = _predict_xstart_from_eps(x_t=x, t=t, eps=model_output)
         if not self.is_lat:
@@ -112,19 +128,19 @@ class _DDIMSamplerTorch(torch.nn.Module):
         )
 
 class DDIMSamplerLat(_DDIMSamplerTorch):
-    def __init__(self, conf, dtype=torch.float32):
-        super().__init__(conf, dtype, is_lat=True)
+    def __init__(self, conf, dtype=torch.float32, fp16=False):
+        super().__init__(conf, dtype, fp16, is_lat=True)
 
 class DDIMSamplerImg(_DDIMSamplerTorch):
-    def __init__(self, conf, dtype=torch.float32):
-        super().__init__(conf, dtype, is_lat=False)
+    def __init__(self, conf, dtype=torch.float32, fp16=False):
+        super().__init__(conf, dtype, fp16, is_lat=False)
 
 class DiffAEModel(torch.nn.Module):
-    def __init__(self, dset, dev_lat='cpu', dev_img='cpu', lat_fused=False, img_fused=False):
+    def __init__(self, dset, dev_lat='cpu', dev_img='cpu', fp16=False, lat_fused=False, img_fused=False):
         super().__init__()
         conf = getattr(templates_latent, f'{dset}_autoenc_latent')()
         conf.pretrain = None
-        conf.fp16 = False
+        conf.fp16 = fp16
         conf.seed = None # will be set globally if not None
         self.name = conf.name
 
@@ -135,8 +151,8 @@ class DiffAEModel(torch.nn.Module):
         self.dset_lats = model.conds
 
         self.res = conf.img_size
-        self.lat_sampl = DDIMSamplerLat(conf).to(dev_lat)
-        self.img_sampl = DDIMSamplerImg(conf).to(dev_img)
+        self.lat_sampl = DDIMSamplerLat(conf, fp16=fp16).to(dev_lat)
+        self.img_sampl = DDIMSamplerImg(conf, fp16=fp16).to(dev_img)
         self.img_net = model.ema_model.to(dev_img) # sets both
         self.lat_net = model.ema_model.latent_net.to(dev_lat) # overrides
         self.dev_lat = torch.device(dev_lat)
