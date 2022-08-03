@@ -46,84 +46,69 @@ backends = ['CPUExecutionProvider']
 # Run
 seed = 0
 T = np.array([10], dtype=np.int64)
-x = RandomState(seed).randn(1, 512).astype(np.float32)
+x_lat = RandomState(seed).randn(1, 512).astype(np.float32)
+x_img = RandomState(seed).randn(1, 3, 256, 256).astype(np.float32)
 
-sess = ort.InferenceSession(lat_init, providers=backends)
-lat_params = sess.run(input_feed={ 'T': T },
-    output_names=[
-        'timestep_map',
-        'alphas_cumprod',
-        'alphas_cumprod_prev',
-        'sqrt_recip_alphas_cumprod',
-        'sqrt_recipm1_alphas_cumprod',
-    ])
+def run_full():
+    sess = ort.InferenceSession(lat_init, providers=backends)
+    lat_params = sess.run(input_feed={ 'T': T },
+        output_names=[
+            'timestep_map',
+            'alphas_cumprod',
+            'alphas_cumprod_prev',
+            'sqrt_recip_alphas_cumprod',
+            'sqrt_recipm1_alphas_cumprod',
+        ])
 
-lat_params[0] = lat_params[0].astype(np.int64)
-#ref = model.lat_sampl.forward(torch.from_numpy(T))
-#compare(lat_params, ref)
-#print('Lat-samp params match')
+    lat_params[0] = lat_params[0].astype(np.int64)
+    #ref = model.lat_sampl.forward(torch.from_numpy(T))
+    #compare(lat_params, ref)
+    #print('Lat-samp params match')
 
-# TODO: timestep_map: keep size=1000, just pad with invalid zeros at end?
+    # TODO: timestep_map: keep size=1000, just pad with invalid zeros at end?
+    sess = ort.InferenceSession(lat_step, providers=backends)
+    for i in range(T.item()):
+        x = sess.run(input_feed={
+            't': (T - i - 1),
+            'x': x,
+            'timestep_map': lat_params[0],
+            'alphas_cumprod': lat_params[1],
+            'alphas_cumprod_prev': lat_params[2],
+            'sqrt_recip_alphas_cumprod': lat_params[3],
+            'sqrt_recipm1_alphas_cumprod': lat_params[4],
+        }, output_names=['lats'])[0]
 
-sess = ort.InferenceSession(lat_step, providers=backends)
-for i in range(T.item()):
-    x_out = sess.run(input_feed={
-        't': (T - i - 1),
-        'x': x,
-        'timestep_map': lat_params[0],
-        'alphas_cumprod': lat_params[1],
-        'alphas_cumprod_prev': lat_params[2],
-        'sqrt_recip_alphas_cumprod': lat_params[3],
-        'sqrt_recipm1_alphas_cumprod': lat_params[4],
-    }, output_names=['lats'])
-    #eval_model = lambda x, t: model.lat_net(x, t)
-    #ref = model.lat_sampl.sample_incr(torch.from_numpy(T - i - 1), torch.from_numpy(x), eval_model, *(torch.from_numpy(v) for v in lat_params))
-    #compare(x_out, [ref], rtol=1e-2)
-    print('.', end='')
-    x = x_out[0]
+    sess = ort.InferenceSession(lat_norm, providers=backends)
+    lats = sess.run(input_feed={'lats_in': x}, output_names=['lats'])[0]
 
-sess = ort.InferenceSession(lat_norm, providers=backends)
-lats = sess.run(input_feed={'lats_in': x}, output_names=['lats'])[0]
-#lats = model.lat_denorm(torch.from_numpy(x)).numpy()
+    sess = ort.InferenceSession(img_init, providers=backends)
+    img_params = sess.run(input_feed={ 'T': T },
+        output_names=[
+            'timestep_map',
+            'alphas_cumprod',
+            'alphas_cumprod_prev',
+            'sqrt_recip_alphas_cumprod',
+            'sqrt_recipm1_alphas_cumprod',
+        ])
 
-sess = ort.InferenceSession(img_init, providers=backends)
-img_params = sess.run(input_feed={ 'T': T },
-    output_names=[
-        'timestep_map',
-        'alphas_cumprod',
-        'alphas_cumprod_prev',
-        'sqrt_recip_alphas_cumprod',
-        'sqrt_recipm1_alphas_cumprod',
-    ])
+    img_params[0] = img_params[0].astype(np.int64)
 
-img_params[0] = img_params[0].astype(np.int64)
-#compare(img_params, model.img_sampl.forward(torch.from_numpy(T)))
-
-# TODO: needs lats from PT to work...
-#lats = model.sample_lat_loop(torch.from_numpy(T), torch.from_numpy(x)).cpu().numpy()
-
-x = RandomState(seed).randn(1, 3, 256, 256).astype(np.float32)
-sess = ort.InferenceSession(img_step, providers=backends)
-for i in trange(T.item()):
-    x_out = sess.run(input_feed={
-        't': (T - i - 1),
-        'x': x,
-        'lats': lats,
-        'timestep_map': img_params[0],
-        'alphas_cumprod': img_params[1],
-        'alphas_cumprod_prev': img_params[2],
-        'sqrt_recip_alphas_cumprod': img_params[3],
-        'sqrt_recipm1_alphas_cumprod': img_params[4],
-    }, output_names=['output'])
+    sess = ort.InferenceSession(img_step, providers=backends)
+    for i in trange(T.item()):
+        x = sess.run(input_feed={
+            't': (T - i - 1),
+            'x': x,
+            'lats': lats,
+            'timestep_map': img_params[0],
+            'alphas_cumprod': img_params[1],
+            'alphas_cumprod_prev': img_params[2],
+            'sqrt_recip_alphas_cumprod': img_params[3],
+            'sqrt_recipm1_alphas_cumprod': img_params[4],
+        }, output_names=['output'])[0]
     
-    #eval_model = lambda x, t: model.img_net(x, t, cond=torch.from_numpy(lats))
-    #ref = model.img_sampl.sample_incr(torch.from_numpy(T - i - 1), torch.from_numpy(x), eval_model, *(torch.from_numpy(v) for v in img_params))
-    
-    #compare(x_out, [ref], rtol=1)
-    #print(x_out[0].reshape(-1)[i:i+4])
-    #print(ref.numpy().reshape(-1)[i:i+4])
-    
-    x = x_out[0]
+    return x
 
-show(x)
+
+show(run_full())
+show(run_fused())
 print('Done')

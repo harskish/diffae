@@ -24,8 +24,8 @@ class _DDIMSamplerTorch(torch.nn.Module):
         else:
             betas = conf._make_diffusion_conf(conf.T).betas
         alphas = 1.0 - betas
-        self.alphas_cumprod = torch.tensor(
-            np.cumprod(alphas, axis=0), dtype=dtype) # constant
+        self.register_buffer('alphas_cumprod', torch.tensor(
+            np.cumprod(alphas, axis=0), dtype=dtype)) # constant
         self.T_orig = conf.T # constant
         self.is_lat = is_lat
 
@@ -54,14 +54,15 @@ class _DDIMSamplerTorch(torch.nn.Module):
             a2 = _extract_into_tensor(sqrt_recipm1_alphas_cumprod, t, x_t.shape)
             return (a1 * x_t - a2 * eps)
 
+        # Reads single value (assuming timesteps are equal over batch dim)
         def _extract_into_tensor(arr, timesteps, broadcast_shape):
-            res = arr.float().to(device=timesteps.device)[timesteps]
+            #res = arr.float().to(device=timesteps.device)[timesteps]
+            res = arr[timesteps]
             while len(res.shape) < len(broadcast_shape):
                 res = res[..., None]
             return res.expand(broadcast_shape)
 
-        map_tensor = timestep_map.to(t.device)
-        model_forward = eval_model(x, map_tensor[t])
+        model_forward = eval_model(x, timestep_map[t])
         model_output = model_forward.pred
 
         pred_xstart = _predict_xstart_from_eps(x_t=x, t=t, eps=model_output)
@@ -80,11 +81,11 @@ class _DDIMSamplerTorch(torch.nn.Module):
 
     # Get params given number of inference steps T
     def forward(self, T: torch.Tensor):
-        dtype = self.alphas_cumprod.dtype
-        const_one = torch.tensor([1.0], dtype=dtype)
+        const_one = torch.tensor([1.0], dtype=self.alphas_cumprod.dtype, device=T.device)
 
         # The size of timestep_map will be static in onnx export...
-        timestep_map = torch.linspace(0, self.T_orig, torch.ones(1).repeat(T.clip(2, None)).size(0) + 1, dtype=torch.int64)[:-1]
+        n_steps = torch.ones(1).repeat(T.clip(2, None)).size(0)
+        timestep_map = torch.linspace(0, self.T_orig, n_steps + 1, dtype=torch.int64, device=T.device)[:-1]
         alphas_cumprod = self.alphas_cumprod[timestep_map]
         padded = torch.cat((const_one, alphas_cumprod), dim=0)
         betas = 1 - padded[1:] / padded[:-1]

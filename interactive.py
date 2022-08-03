@@ -2,6 +2,7 @@ import os
 import imgui
 import torch
 import argparse
+import gdown
 import numpy as np
 from multiprocessing import Lock
 from dataclasses import dataclass
@@ -12,7 +13,7 @@ from viewer.utils import reshape_grid, combo_box_vals
 from typing import Dict, Tuple
 from os import makedirs
 from pathlib import Path
-import gdown
+from glfw import KEY_LEFT_SHIFT
 
 from bench import CONFIGS
 from tracealbe import DiffAEModel
@@ -69,7 +70,13 @@ class ModelViz(ToolbarViewer):
         self.state.pkl = args.model
         self.G_lock = Lock()
 
-        self.state.backend = device
+        default_backends = {
+            'mps': 'mps',
+            'cpu': 'cpu',
+            'cuda': 'cuda_opt',
+        }
+
+        self.state.backend = default_backends[device]
     
     @lru_cache()
     def _get_model(self, name, backend):
@@ -105,7 +112,7 @@ class ModelViz(ToolbarViewer):
             dev = self.rend.model.dev_img
             self.rend.intermed = sample_normal((s.B, 3, res, res), s.seed).to(dev) # spaial noise
             if not self.rend.model.img_fused:
-                self.rend.img_samp_params = self.rend.model.get_img_sampl_params(torch.tensor([s.T]))
+                self.rend.img_samp_params = self.rend.model.get_img_sampl_params(torch.tensor([s.T], device=dev))
 
         # Check if work is done
         if self.rend.i >= s.T - 1:
@@ -163,12 +170,14 @@ class ModelViz(ToolbarViewer):
         return grid if grid.device.type == 'cuda' else grid.cpu().numpy()
     
     def draw_toolbar(self):
+        jmp_large = 100 if self.v.keydown(KEY_LEFT_SHIFT) else 10
+
         s = self.state
         s.B = imgui.input_int('B', s.B)[1]
         s.seed = max(0, imgui.input_int('Seed', s.seed, s.B, 1)[1])
         s.show_ds = imgui.checkbox('Dataset latents', s.show_ds)[1]
-        s.T = imgui.input_int('T_img', s.T, 1, 10)[1]
-        s.lat_T = imgui.input_int('T_lat', s.lat_T, 1, 10)[1]
+        s.T = imgui.input_int('T_img', s.T, 1, jmp_large)[1]
+        s.lat_T = imgui.input_int('T_lat', s.lat_T, 1, jmp_large)[1]
         s.pkl = combo_box_vals('Model', model_opts, s.pkl)[1]
         s.backend = combo_box_vals('Backend', list(CONFIGS.keys()), s.backend)[1]
 
