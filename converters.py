@@ -3,6 +3,7 @@
 from multiprocessing.pool import RUN
 from random import Random
 from sympy import comp
+import time
 import torch
 import numpy as np
 from numpy.random import RandomState
@@ -14,36 +15,20 @@ from tqdm import trange
 from tracealbe import DiffAEModel
 #import tvm # from source, v0.9.0
 
-def compare(ta, tb, rtol=1e-3):
-    for i, (a, b) in enumerate(zip(ta, tb)):
-        if torch.is_tensor(a):
-            a = a.cpu().numpy()
-        if torch.is_tensor(b):
-            b = b.cpu().numpy()
-        
-        if not np.allclose(a, b, rtol=rtol):
-            print(f'i={i}: differs!')
-            print(a.reshape(-1)[i:i+4])
-            print(b.reshape(-1)[i:i+4])
-            raise RuntimeError()
-
 # Export
 #model: DiffAEModel = CONFIGS['cpu_traced']('ffhq256', export=True)
 #model: DiffAEModel = CONFIGS['cuda_traced_fp16']('ffhq256', export=True)
 #model: DiffAEModel = CONFIGS['cpu']('ffhq256')
-lat_init = 'ffhq256_lat_init.onnx'
-lat_step = 'ffhq256_lat.onnx'
-lat_norm = 'ffhq256_lat_norm.onnx'
-img_init = 'ffhq256_img_init.onnx'
-img_step = 'ffhq256_img.onnx'
+lat_init = 'ckpts/ffhq256_lat_init.onnx'
+lat_step = 'ckpts/ffhq256_lat.onnx'
+lat_step_fused = 'ckpts/ffhq256_lat_fused.onnx'
+lat_norm = 'ckpts/ffhq256_lat_norm.onnx'
+img_init = 'ckpts/ffhq256_img_init.onnx'
+img_step = 'ckpts/ffhq256_img.onnx'
+img_step_fused = 'ckpts/ffhq256_img_fused.onnx'
 
 # In order of preference
 backends = ['CPUExecutionProvider']
-
-# IMG STEP: broken?
-# mod = onnx.load(img_step)
-# onnx.checker.check_model(mod)
-# print(onnx.helper.printable_graph(mod.graph))
 
 # Run
 seed = 0
@@ -53,7 +38,8 @@ x_img = RandomState(seed).randn(1, 3, 256, 256).astype(np.float32)
 
 def run_full():
     global x_lat, x_img
-
+    
+    t0 = time.time()
     sess = ort.InferenceSession(lat_init, providers=backends)
     lat_params = sess.run(input_feed={ 'T': T },
         output_names=[
@@ -65,9 +51,6 @@ def run_full():
         ])
 
     lat_params[0] = lat_params[0].astype(np.int64)
-    #ref = model.lat_sampl.forward(torch.from_numpy(T))
-    #compare(lat_params, ref)
-    #print('Lat-samp params match')
 
     # TODO: timestep_map: keep size=1000, just pad with invalid zeros at end?
     sess = ort.InferenceSession(lat_step, providers=backends)
@@ -84,6 +67,8 @@ def run_full():
 
     sess = ort.InferenceSession(lat_norm, providers=backends)
     lats = sess.run(input_feed={'lats_in': x_lat}, output_names=['lats'])[0]
+
+    t1 = time.time()
 
     sess = ort.InferenceSession(img_init, providers=backends)
     img_params = sess.run(input_feed={ 'T': T },
@@ -110,12 +95,51 @@ def run_full():
             'sqrt_recipm1_alphas_cumprod': img_params[4],
         }, output_names=['output'])[0]
     
+    t2 = time.time()
+
+    vlat = T.item() / (t1 - t0)
+    vimg = T.item() / (t2 - t1)
+
+    print(f'[Split] Lat: {vlat:.2f}it/s, Img: {vimg:.2f}it/s')
     return x_img
 
 def run_fused():
     global x_lat, x_img
-    raise NotImplementedError()
 
-show(run_full())
+    t0 = time.time()
+    sess = ort.InferenceSession(lat_step_fused, providers=backends)
+    for i in range(T.item()):
+        x_lat = sess.run(
+            output_names=['lats'],
+            input_feed={
+                'T': T,
+                't': T - i - 1,
+                'x': x_lat
+            })[0]
+
+    sess = ort.InferenceSession(lat_norm, providers=backends)
+    lats = sess.run(input_feed={'lats_in': x_lat}, output_names=['lats'])[0]
+
+    t1 = time.time()
+    sess = ort.InferenceSession(img_step_fused, providers=backends)
+    for i in trange(T.item()):
+        x_img = sess.run(
+            output_names=['output'],
+            input_feed={
+                'T': T,
+                't': T - i - 1,
+                'x': x_img,
+                'lats': lats,
+            })[0]
+
+    t2 = time.time()
+    vlat = T.item() / (t1 - t0)
+    vimg = T.item() / (t2 - t1)
+
+    print(f'[Fused] Lat: {vlat:.2f}it/s, Img: {vimg:.2f}it/s')
+    return x_img
+
+
 show(run_fused())
+show(run_full())
 print('Done')

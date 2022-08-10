@@ -12,6 +12,8 @@ from tqdm import trange
 import random
 import time
 import re
+from os import makedirs
+from pathlib import Path
 
 from tracealbe import DiffAEModel
 torch.autograd.set_grad_enabled(False)
@@ -127,6 +129,7 @@ def model_torch_traced(
     fuse_img=False,
     export=False
 ) -> DiffAEModel:
+    makedirs(Path(__file__).parent / 'ckpts', exist_ok=True)
     model = _get_model(dev_lat, dev_img, dset, fp16, fuse_lat, fuse_img)
     check_trace = 'mps' not in [dev_img, dev_lat]
     suff = '_fp16' if fp16 else ''
@@ -153,11 +156,11 @@ def model_torch_traced(
             fwd_fun = lambda T : model.lat_sampl.forward(T)
             jit_lat_init = torch.jit.trace(fwd_fun, (T), check_trace=check_trace)
             if export:
-                jit_lat_init.save(f'{dset}_lat_init{suff}.pt')
+                jit_lat_init.save(f'ckpts/{dset}_lat_init{suff}.pt')
                 torch.onnx.export(
                     jit_lat_init,                 # model being run
                     (T),                          # model input (or a tuple for multiple inputs)
-                    f'{dset}_lat_init{suff}.onnx',      # where to save the model (can be a file or file-like object)
+                    f'ckpts/{dset}_lat_init{suff}.onnx',      # where to save the model (can be a file or file-like object)
                     input_names = ['T'],          # the model's input names
                     output_names = [              # the model's output names
                         'timestep_map',
@@ -197,11 +200,11 @@ def model_torch_traced(
             model.lat_sampl.sample_incr = lambda t, x, _, *params : jit_lat(t, x, *params)
 
         if export:
-            jit_lat.save(f'{model_name}{suff}.pt')
+            jit_lat.save(f'ckpts/{model_name}{suff}.pt')
             torch.onnx.export(
                 jit_lat,                  # model being run
                 ex_inputs,                # model input (or a tuple for multiple inputs)
-                f'{model_name}{suff}.onnx',     # where to save the model (can be a file or file-like object)
+                f'ckpts/{model_name}{suff}.onnx',     # where to save the model (can be a file or file-like object)
                 input_names = input_names,
                 output_names = ['lats'],
                 #do_constant_folding=False
@@ -211,9 +214,9 @@ def model_torch_traced(
         norm_fun = lambda lats : model.lat_denorm(lats)
         jit_norm = torch.jit.trace(norm_fun, (torch.randn(B, 512)))
         if export:
-            jit_norm.save(f'{dset}_lat_norm{suff}.pt')
+            jit_norm.save(f'ckpts/{dset}_lat_norm{suff}.pt')
             torch.onnx.export(jit_norm, (torch.randn(B, 512)),
-                f'{dset}_lat_norm.onnx', input_names=['lats_in'], output_names=['lats'])
+                f'ckpts/{dset}_lat_norm.onnx', input_names=['lats_in'], output_names=['lats'])
 
         setattr(model.lat_net, 'mode', 'JIT')
 
@@ -225,11 +228,11 @@ def model_torch_traced(
             fwd_fun = lambda T : model.img_sampl.forward(T)
             jit_img_init = torch.jit.trace(fwd_fun, (T), check_trace=check_trace)
             if export:
-                jit_img_init.save(f'{dset}_img_init{suff}.pt')
+                jit_img_init.save(f'ckpts/{dset}_img_init{suff}.pt')
                 torch.onnx.export(
                     jit_img_init,                 # model being run
                     (T),                          # model input (or a tuple for multiple inputs)
-                    f'{dset}_img_init{suff}.onnx',      # where to save the model (can be a file or file-like object)
+                    f'ckpts/{dset}_img_init{suff}.onnx',      # where to save the model (can be a file or file-like object)
                     input_names = ['T'],          # the model's input names
                     output_names = [              # the model's output names
                         'timestep_map',
@@ -273,11 +276,11 @@ def model_torch_traced(
             model.img_sampl.sample_incr = lambda t, x, mod, *params : jit_img(t, x, mod.keywords['cond'], *params)
 
         if export:
-            jit_img.save(f'{model_name}{suff}.pt')
+            jit_img.save(f'ckpts/{model_name}{suff}.pt')
             torch.onnx.export(
                 jit_img,                     # model being run
                 ex_inputs,                   # model input (or a tuple for multiple inputs)
-                f'{model_name}{suff}.onnx',        # where to save the model (can be a file or file-like object)
+                f'ckpts/{model_name}{suff}.onnx',        # where to save the model (can be a file or file-like object)
                 input_names = input_names,
                 output_names = ['output'],
                 #do_constant_folding=False,
