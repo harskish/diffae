@@ -1,0 +1,18 @@
+name: diffae
+channels:
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+    - whl/torch-1.13.0a0+gite6966d0-cp310-cp310-macosx_12_0_arm64.whl
+    - pytorch-lightning
+    - torchvision
+    - imgui[glfw]==1.4
+    - pytorch-fid
+    - lpips
+    - lmdb
+    - gdown
+    - pandas
+
+# conda env update -f environment_mac.yml --prune
