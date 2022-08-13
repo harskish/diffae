@@ -116,6 +116,47 @@ def _get_model(dev_lat, dev_img, dset, fp16=False, lat_fused=False, img_fused=Fa
 def model_torch(dev_lat, dev_img, dset, fp16=False):
     return _get_model(dev_lat, dev_img, dset, fp16, False, False)
 
+def test_static(
+    dev_lat,
+    dev_img,
+    dset,
+    fp16=False,
+    B=1,
+    trace_lat=True,
+    trace_img=True,
+    fuse_lat=False,
+    fuse_img=False,
+    export=False
+) -> DiffAEModel:
+    makedirs(Path(__file__).parent / 'ckpts', exist_ok=True)
+    model = _get_model(dev_lat, dev_img, dset, fp16, fuse_lat, fuse_img)
+    suff = '_static10'
+
+    T = torch.tensor([10] * B, dtype=torch.int64).view(-1, 1).to(dev_lat)
+    t = T - 1
+    
+    # Latent net init
+    fwd_fun = lambda T : model.lat_sampl.forward_static_10(T)
+    jit_lat_init = torch.jit.trace(fwd_fun, (T), check_trace=False)
+    if export:
+        jit_lat_init.save(f'ckpts/{dset}_lat_init{suff}.pt')
+        torch.onnx.export(
+            jit_lat_init,                 # model being run
+            (T),                          # model input (or a tuple for multiple inputs)
+            f'ckpts/{dset}_lat_init{suff}.onnx',      # where to save the model (can be a file or file-like object)
+            input_names = ['T'],          # the model's input names
+            output_names = [              # the model's output names
+                'timestep_map',
+                'alphas_cumprod',
+                'alphas_cumprod_prev',
+                'sqrt_recip_alphas_cumprod',
+                'sqrt_recipm1_alphas_cumprod',
+            ]
+        )
+
+        print('Exported static lat_init')
+
+
 # https://ppwwyyxx.com/blog/2022/TorchScript-Tracing-vs-Scripting/
 def model_torch_traced(
     dev_lat,
@@ -137,7 +178,7 @@ def model_torch_traced(
     if is_set('USE_MKLDNN') and is_set('BUILD_ONEDNN_GRAPH'):
         torch.jit.enable_onednn_fusion(True)
 
-    T = torch.tensor([10] * B, dtype=torch.int64).to(dev_lat)
+    T = torch.tensor([10] * B, dtype=torch.int64).view(-1, 1).to(dev_lat)
     t = T - 1
 
     # torch.jit.trace(lambda) => TraceFunction
@@ -330,6 +371,7 @@ CONFIGS = {
     'mps_pt': partial(load_pt_model, 'mps', 'mps'),
     'mps_opt': partial(model_torch_traced, 'mps', 'mps', trace_img=False),
     'm2_opt': partial(model_torch_traced, 'cpu', 'mps'),
+    'static_lat_init': partial(test_static, 'cpu', 'cpu')
 }
 
 if __name__ == '__main__':

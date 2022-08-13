@@ -16,8 +16,9 @@ from tracealbe import DiffAEModel
 #import tvm # from source, v0.9.0
 
 # Export
-#model: DiffAEModel = CONFIGS['cpu_traced']('ffhq256', export=True)
-#model: DiffAEModel = CONFIGS['cuda_traced_fp16']('ffhq256', export=True)
+#model: DiffAEModel = CONFIGS['cpu_traced']('ffhq256', B=1, export=True)
+#model: DiffAEModel = CONFIGS['cpu_fused']('ffhq256', B=1, export=True)
+#model: DiffAEModel = CONFIGS['cuda_traced_fp16']('ffhq256', B=2, export=True)
 #model: DiffAEModel = CONFIGS['cpu']('ffhq256')
 lat_init = 'ckpts/ffhq256_lat_init.onnx'
 lat_step = 'ckpts/ffhq256_lat.onnx'
@@ -31,8 +32,9 @@ img_step_fused = 'ckpts/ffhq256_img_fused.onnx'
 backends = ['CPUExecutionProvider']
 
 # Run
+B = 1
 seed = 0
-T = np.array([10], dtype=np.int64)
+T = np.array([10]*B, dtype=np.int64).reshape(-1, 1)
 x_lat = RandomState(seed).randn(1, 512).astype(np.float32)
 x_img = RandomState(seed).randn(1, 3, 256, 256).astype(np.float32)
 

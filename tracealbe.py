@@ -61,6 +61,7 @@ class _DDIMSamplerTorch(torch.nn.Module):
         sqrt_recipm1_alphas_cumprod,
     ):
         eta = 0.0
+        t = t.reshape(-1) # (B,1) dim to (B,)
 
         def _predict_eps_from_xstart(x_t, t, pred_xstart):
             num = _extract_into_tensor(sqrt_recip_alphas_cumprod, t, x_t.shape) * x_t - pred_xstart
@@ -100,9 +101,36 @@ class _DDIMSamplerTorch(torch.nn.Module):
         
         return mean_pred
 
+    # For testing ONNX exports
+    def forward_static_10(self, T: torch.Tensor):
+        const_one = torch.tensor([1.0], dtype=self.alphas_cumprod.dtype, device=T.device)
+
+        timestep_map = torch.linspace(0, self.T_orig, 10 + 1, dtype=torch.int64, device=T.device)[:-1]
+        alphas_cumprod = self.alphas_cumprod[timestep_map] + 1e-6*T.view(-1).sum() # keep T in graph
+        padded = torch.cat((const_one, alphas_cumprod), dim=0)
+        betas = 1 - padded[1:] / padded[:-1]
+        
+        # Then compute alphas etc. (GaussianDiffusionBeatGans)
+        alphas = 1.0 - betas
+        alphas_cumprod = onnx_compatible_cumprod(alphas, dim=0) # ONNX has no cumprod...
+        alphas_cumprod_prev = torch.cat((const_one, alphas_cumprod[:-1]))
+        sqrt_recip_alphas_cumprod = torch.sqrt(1.0 / alphas_cumprod)
+        sqrt_recipm1_alphas_cumprod = torch.sqrt(1.0 / alphas_cumprod - 1)
+
+        # jit.trace requires a constant container (tuple instead of list, NamedTuple instead of dict)
+        return (
+            timestep_map,
+            alphas_cumprod,
+            alphas_cumprod_prev,
+            sqrt_recip_alphas_cumprod,
+            sqrt_recipm1_alphas_cumprod,
+        )
+    
     # Get params given number of inference steps T
     def forward(self, T: torch.Tensor):
         const_one = torch.tensor([1.0], dtype=self.alphas_cumprod.dtype, device=T.device)
+        #T = T.view(-1) # (B,1) to (B,)
+        T = T[0, 0] # must assume identical across batch dim
 
         # The size of timestep_map will be static in onnx export...
         n_steps = torch.ones(1).repeat(T.clip(2, None)).size(0)

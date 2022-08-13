@@ -115,7 +115,7 @@ class ModelViz(ToolbarViewer):
             dev = self.rend.model.dev_img
             self.rend.intermed = sample_normal((s.B, 3, res, res), s.seed).to(dev) # spaial noise
             if not self.rend.model.img_fused:
-                self.rend.img_samp_params = self.rend.model.get_img_sampl_params(torch.tensor([s.T], device=dev))
+                self.rend.img_samp_params = self.rend.model.get_img_sampl_params(torch.tensor([[s.T]], device=dev))
 
         # Check if work is done
         if self.rend.i >= s.T - 1:
@@ -134,7 +134,7 @@ class ModelViz(ToolbarViewer):
             missing = [k[0] for k in keys if k not in self.rend.lat_cache]
             if missing:
                 latent_noise = seeds_to_samples(missing, (len(missing), 512)).to(model.dev_lat)
-                lats = model.sample_lat_loop(torch.tensor([s.lat_T], device=model.dev_lat), latent_noise)
+                lats = model.sample_lat_loop(torch.tensor([[s.lat_T]], device=model.dev_lat), latent_noise)
                 
                 # Update cache
                 for seed, lat in zip(missing, lats):
@@ -143,7 +143,7 @@ class ModelViz(ToolbarViewer):
             cond = torch.stack([self.rend.lat_cache[k].to(model.dev_img) for k in keys], dim=0)
 
         # Run diffusion one step forward
-        T = torch.tensor([s.T] * s.B, device=model.dev_img)
+        T = torch.tensor([s.T] * s.B, device=model.dev_img).view(-1, 1)
         t = T - self.rend.i - 1 # 0-based index, num_steps -> 0
         if model.img_fused:
             self.rend.intermed = model.sample_img_incr_fused(T, t, self.rend.intermed, cond)

@@ -20,3 +20,4 @@ figures/**/*.pdf
 figures/memorization/*.svg
 preproc/AMOS/AMOS_files/
 checkpoints/*
+ckpts/*
