@@ -135,11 +135,14 @@ def load_relay_cached(model_path: str, batch_dim = 1):
     # Cache
     if not graph.is_file() or not param.is_file():
         model = onnx.load(model_path)
+        model.__class__.__repr__ = lambda _ : 'dummy'
         in_shapes, _ = get_shapes_onnx(model)
         for k, v in in_shapes.items():
-            if v[0] not in [str(batch_dim), '?']:
-                raise RuntimeError(f'Incompatible static batch dim for {k}: {v}')
-            in_shapes[k] = [batch_dim] + [int(s) for s in v[1:]]
+            if len(v) > 1:
+                if v[0] not in [str(batch_dim), '?']:
+                    raise RuntimeError(f'Incompatible static batch dim for {k}: {v}')
+                v[0] = batch_dim
+            in_shapes[k] = [int(s) for s in v]
 
         # freeze_params converts dynamic shapes to static ones
         mod, params = relay.frontend.from_onnx(model, shape=in_shapes, freeze_params=True)
@@ -229,9 +232,9 @@ def compile_autotvm(mod_name, ops=()):
     # print(out)
 
     # Test: run model 
-    print('Exporting test lib')
-    lib = relay.build(mod, target=target, params=params) # targets graph executor
-    lib.export_library(f'test_model_{target.kind.name}.dylib')
+    #print('Exporting test lib')
+    #lib = relay.build(mod, target=target, params=params) # targets graph executor
+    #lib.export_library(f'test_model_{target.kind.name}.dylib')
 
     # Get tasks
     # nn.dense, nn.conv2d, nn.bias_add
@@ -240,8 +243,8 @@ def compile_autotvm(mod_name, ops=()):
     with warnings.catch_warnings():
         warnings.filterwarnings('ignore', category=UserWarning)
         tasks = autotvm.task.extract_from_program(
-            mod['main'], target=target, params=params, ops=[relay.op.get(n) for n in ops]
-        )
+            mod['main'], target=target, params=params, ops=[relay.op.get(n) for n in ops])
+    
     assert tasks, 'No tasks found!'
     print('Found', len(tasks), 'tasks')
 
@@ -275,7 +278,7 @@ def compile_autotvm(mod_name, ops=()):
     tuning_option = {
         'log_filename': log_file,
         'tuner': 'xgb', # 'xgb', 'xgb_knob', 'xgb_itervar', 'xgb_curve', 'ga', 'random', 'gridsearch'
-        'n_trial': 150, #1500,
+        'n_trial': 15, #1500,
         'early_stopping': 800,
         'measure_option': autotvm.measure_option(
             builder=autotvm.LocalBuilder(build_func='ndk' if use_android else 'default'),
@@ -361,8 +364,16 @@ if __name__ == '__main__':
     #compile_tvmc(lat_init_static)
     #compile_tvmc(lat_step_fused) # Cannot allocate memory symbolic tensor shape [?]
     #compile_autotvm(img_step_fused)
-    compile_autotvm(lat_init_static) # OK!
-    compile_autotvm(lat_init) # Cannot allocate memory symbolic tensor shape [?]
-    #compile_autotvm(lat_step_fused)
+    #compile_autotvm(lat_init_static) # OK!
+    #compile_autotvm(lat_init) # Cannot allocate memory symbolic tensor shape [?]
+    #compile_autotvm(lat_step_fused) # dynamic linspace => error
+    
+    # Fully statc shapes
+    compile_tvmc(lat_step)
+    compile_tvmc(img_step)
+    compile_autotvm(lat_step)
+    compile_autotvm(img_step)
+
+    # TODO: fused models that take pre-constructed linspace in
 
     print('Done')

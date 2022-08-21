@@ -33,7 +33,7 @@ def onnx_compatible_cumprod(t: torch.Tensor, dim: int=0):
 
 # Traceable sampler
 class _DDIMSamplerTorch(torch.nn.Module):
-    def __init__(self, conf, dtype=torch.float32, fp16=False, is_lat=False):
+    def __init__(self, conf, dtype=torch.float32, fp16=False, is_lat=False, static_len=False):
         super().__init__()
 
         # Compute alphas based on T_orig
@@ -47,6 +47,7 @@ class _DDIMSamplerTorch(torch.nn.Module):
         self.T_orig = conf.T # constant
         self.is_lat = is_lat
         self.fp16 = fp16
+        self.static_param_len = static_len # pad output params to static length (T_orig)
 
     # Sample incrementally (single iteration)
     def sample_incr(
@@ -132,10 +133,24 @@ class _DDIMSamplerTorch(torch.nn.Module):
         #T = T.view(-1) # (B,1) to (B,)
         T = T[0, 0] # must assume identical across batch dim
 
-        # The size of timestep_map will be static in onnx export...
+        # Keep param lengths static (requred for TVM graph runtime)
         n_steps = torch.ones(1).repeat(T.clip(2, None)).size(0)
-        timestep_map = torch.linspace(0, self.T_orig, n_steps + 1, dtype=torch.int64, device=T.device)[:-1]
+        if self.static_param_len:
+            timestep_map = torch.zeros(self.T_orig, dtype=torch.int64)
+            timestep_map[:n_steps] = \
+                torch.linspace(0, self.T_orig, n_steps + 1, dtype=torch.int64, device=T.device)[:-1]
+        else:
+            timestep_map = torch.linspace(0, self.T_orig, n_steps + 1, dtype=torch.int64, device=T.device)[:-1]
+        
         alphas_cumprod = self.alphas_cumprod[timestep_map]
+        
+        # Only read required amount?
+        # if self.static_param_len:
+        #     alphas_cumprod = torch.zeros_like(self.alphas_cumprod)
+        #     alphas_cumprod[:n_steps] = self.alphas_cumprod[timestep_map[:n_steps]]
+        # else:
+        #     alphas_cumprod = self.alphas_cumprod[timestep_map]
+
         padded = torch.cat((const_one, alphas_cumprod), dim=0)
         betas = 1 - padded[1:] / padded[:-1]
         
@@ -156,15 +171,15 @@ class _DDIMSamplerTorch(torch.nn.Module):
         )
 
 class DDIMSamplerLat(_DDIMSamplerTorch):
-    def __init__(self, conf, dtype=torch.float32, fp16=False):
-        super().__init__(conf, dtype, fp16, is_lat=True)
+    def __init__(self, conf, dtype=torch.float32, fp16=False, static_len=False):
+        super().__init__(conf, dtype, fp16, is_lat=True, static_len=static_len)
 
 class DDIMSamplerImg(_DDIMSamplerTorch):
-    def __init__(self, conf, dtype=torch.float32, fp16=False):
-        super().__init__(conf, dtype, fp16, is_lat=False)
+    def __init__(self, conf, dtype=torch.float32, fp16=False, static_len=False):
+        super().__init__(conf, dtype, fp16, is_lat=False, static_len=static_len)
 
 class DiffAEModel(torch.nn.Module):
-    def __init__(self, dset, dev_lat='cpu', dev_img='cpu', fp16=False, lat_fused=False, img_fused=False):
+    def __init__(self, dset, dev_lat='cpu', dev_img='cpu', fp16=False, lat_fused=False, img_fused=False, static_param_len=True):
         super().__init__()
         conf = getattr(templates_latent, f'{dset}_autoenc_latent')()
         conf.pretrain = None
@@ -179,8 +194,8 @@ class DiffAEModel(torch.nn.Module):
         self.dset_lats = model.conds
 
         self.res = conf.img_size
-        self.lat_sampl = DDIMSamplerLat(conf, fp16=fp16).to(dev_lat)
-        self.img_sampl = DDIMSamplerImg(conf, fp16=fp16).to(dev_img)
+        self.lat_sampl = DDIMSamplerLat(conf, fp16=fp16, static_len=static_param_len).to(dev_lat)
+        self.img_sampl = DDIMSamplerImg(conf, fp16=fp16, static_len=static_param_len).to(dev_img)
         self.img_net = model.ema_model.to(dev_img) # sets both
         self.lat_net = model.ema_model.latent_net.to(dev_lat) # overrides
         self.dev_lat = torch.device(dev_lat)

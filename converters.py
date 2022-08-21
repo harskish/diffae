@@ -34,16 +34,16 @@ backends = ['CPUExecutionProvider']
 # Run
 B = 1
 seed = 0
-T = np.array([10]*B, dtype=np.int64).reshape(-1, 1)
-x_lat = RandomState(seed).randn(1, 512).astype(np.float32)
-x_img = RandomState(seed).randn(1, 3, 256, 256).astype(np.float32)
+T_img = np.array([5]*B, dtype=np.int64).reshape(-1, 1)
+T_lat = np.array([20]*B, dtype=np.int64).reshape(-1, 1)
 
 def run_full():
-    global x_lat, x_img
+    x_lat = RandomState(seed).randn(1, 512).astype(np.float32)
+    x_img = RandomState(seed).randn(1, 3, 256, 256).astype(np.float32)
     
     t0 = time.time()
     sess = ort.InferenceSession(lat_init, providers=backends)
-    lat_params = sess.run(input_feed={ 'T': T },
+    lat_params = sess.run(input_feed={ 'T': T_lat },
         output_names=[
             'timestep_map',
             'alphas_cumprod',
@@ -56,9 +56,9 @@ def run_full():
 
     # TODO: timestep_map: keep size=1000, just pad with invalid zeros at end?
     sess = ort.InferenceSession(lat_step, providers=backends)
-    for i in range(T.item()):
+    for i in range(T_lat.item()):
         x_lat = sess.run(input_feed={
-            't': (T - i - 1),
+            't': (T_lat - i - 1),
             'x': x_lat,
             'timestep_map': lat_params[0],
             'alphas_cumprod': lat_params[1],
@@ -73,7 +73,7 @@ def run_full():
     t1 = time.time()
 
     sess = ort.InferenceSession(img_init, providers=backends)
-    img_params = sess.run(input_feed={ 'T': T },
+    img_params = sess.run(input_feed={ 'T': T_img },
         output_names=[
             'timestep_map',
             'alphas_cumprod',
@@ -85,9 +85,9 @@ def run_full():
     img_params[0] = img_params[0].astype(np.int64)
 
     sess = ort.InferenceSession(img_step, providers=backends)
-    for i in trange(T.item()):
+    for i in trange(T_img.item()):
         x_img = sess.run(input_feed={
-            't': (T - i - 1),
+            't': (T_img - i - 1),
             'x': x_img,
             'lats': lats,
             'timestep_map': img_params[0],
@@ -99,23 +99,24 @@ def run_full():
     
     t2 = time.time()
 
-    vlat = T.item() / (t1 - t0)
-    vimg = T.item() / (t2 - t1)
+    vlat = T_lat.item() / (t1 - t0)
+    vimg = T_img.item() / (t2 - t1)
 
     print(f'[Split] Lat: {vlat:.2f}it/s, Img: {vimg:.2f}it/s')
     return x_img
 
 def run_fused():
-    global x_lat, x_img
+    x_lat = RandomState(seed).randn(1, 512).astype(np.float32)
+    x_img = RandomState(seed).randn(1, 3, 256, 256).astype(np.float32)
 
     t0 = time.time()
     sess = ort.InferenceSession(lat_step_fused, providers=backends)
-    for i in range(T.item()):
+    for i in range(T_lat.item()):
         x_lat = sess.run(
             output_names=['lats'],
             input_feed={
-                'T': T,
-                't': T - i - 1,
+                'T': T_lat,
+                't': T_lat - i - 1,
                 'x': x_lat
             })[0]
 
@@ -124,19 +125,19 @@ def run_fused():
 
     t1 = time.time()
     sess = ort.InferenceSession(img_step_fused, providers=backends)
-    for i in trange(T.item()):
+    for i in trange(T_img.item()):
         x_img = sess.run(
             output_names=['output'],
             input_feed={
-                'T': T,
-                't': T - i - 1,
+                'T': T_img,
+                't': T_img - i - 1,
                 'x': x_img,
                 'lats': lats,
             })[0]
 
     t2 = time.time()
-    vlat = T.item() / (t1 - t0)
-    vimg = T.item() / (t2 - t1)
+    vlat = T_img.item() / (t1 - t0)
+    vimg = T_img.item() / (t2 - t1)
 
     print(f'[Fused] Lat: {vlat:.2f}it/s, Img: {vimg:.2f}it/s')
     return x_img

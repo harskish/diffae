@@ -371,7 +371,7 @@ CONFIGS = {
     'mps_pt': partial(load_pt_model, 'mps', 'mps'),
     'mps_opt': partial(model_torch_traced, 'mps', 'mps', trace_img=False),
     'm2_opt': partial(model_torch_traced, 'cpu', 'mps'),
-    'static_lat_init': partial(test_static, 'cpu', 'cpu')
+    'lat_init_static_B': partial(test_static, 'cpu', 'cpu')
 }
 
 if __name__ == '__main__':

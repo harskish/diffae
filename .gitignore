@@ -12,6 +12,7 @@ video_frames/
 *.jpg
 *.pt
 *.onnx
+*.dylib
 preproc/mpp/*.npy
 erik_gan_viewer/
 figures/datasets/cache/
